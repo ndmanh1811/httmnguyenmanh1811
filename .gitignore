@@ -1,0 +1,49 @@
+# Python & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.part
+*.log
+venv/
+.venv/
+env/
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Frontend
+node_modules/
+dist/
+
+# Databases & local datasets
+*.db
+*.sqlite3
+*.csv
+datasets/
+training/
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Keep application models in models_dir
+!ppe-detection-demo/backend/models_dir/*.pt
+!ppe-detection-demo/backend/models_dir/*.pth
+
+# Static media runtime files (preserve .gitkeep)
+ppe-detection-demo/backend/static/evidence/*
+!ppe-detection-demo/backend/static/evidence/.gitkeep
+ppe-detection-demo/backend/static/outputs/*
+!ppe-detection-demo/backend/static/outputs/.gitkeep
+ppe-detection-demo/backend/static/uploads/*
+!ppe-detection-demo/backend/static/uploads/.gitkeep

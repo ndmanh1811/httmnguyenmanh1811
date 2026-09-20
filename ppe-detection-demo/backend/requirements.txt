@@ -1,0 +1,25 @@
+# Backend Requirements for AI PPE, Fall & Fire/Smoke Safety Monitoring
+Flask>=3.0.0
+Flask-Cors>=4.0.0
+Flask-SQLAlchemy>=3.1.0
+Flask-SocketIO>=5.3.0
+python-socketio>=5.11.0
+python-engineio>=4.9.0
+simple-websocket>=1.0.0
+SQLAlchemy>=2.0.0
+Werkzeug>=3.0.0
+
+# Deep Learning & Computer Vision
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.2.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+imageio>=2.30.0
+imageio-ffmpeg>=0.4.8
+huggingface-hub>=0.20.0
+PyYAML>=6.0
+scipy>=1.10.0
+requests>=2.31.0
+tqdm>=4.65.0
+Pillow>=10.0.0

@@ -1,0 +1,55 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+*.part
+*.log
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Node & Frontend
+node_modules/
+dist/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment & IDE
+.env
+.env.local
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+
+# Databases & local datasets
+*.db
+*.sqlite3
+*.csv
+
+# Media & Runtime Uploads / Outputs (preserve folder structure with .gitkeep)
+backend/static/evidence/*
+!backend/static/evidence/.gitkeep
+backend/static/outputs/*
+!backend/static/outputs/.gitkeep
+backend/static/uploads/*
+!backend/static/uploads/.gitkeep
+backend/test_videos/
+backend/videos/
+backend/*.jpg
+backend/*.png
+training/
+
+# Model weights: Ignore loose or training weights, but keep production models in models_dir
+*.pt
+*.pth
+*.onnx
+!backend/models_dir/*.pt
+!backend/models_dir/*.pth
