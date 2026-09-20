@@ -171,14 +171,14 @@ def validate_dataset(data_yaml_path: Path) -> dict:
 
 def train(
     data_yaml: str,
-    base_weights: str = "yolov8s.pt",
+    base_weights: str = "yolo26s.pt",
     epochs: int = 100,
     batch_size: int = 16,
     imgsz: int = 640,
     patience: int = 20,
     device: str = "",
     project: str = "ppe_training",
-    name: str = "yolov8s_ppe_v2",
+    name: str = "yolo26s_ppe_v2",
 ) -> Path:
     """Chạy quy trình huấn luyện YOLOv8 chuẩn công nghiệp."""
     data_path = Path(data_yaml).resolve()
@@ -245,7 +245,7 @@ def main() -> None:
         description="Huấn luyện mô hình PPE YOLOv8 chống báo động giả (Near-Zero False Alarm)"
     )
     parser.add_argument("--data", type=str, default="", help="Đường dẫn tới file data.yaml của dataset")
-    parser.add_argument("--base", type=str, default="yolov8s.pt", help="Checkpoint gốc (mặc định yolov8s.pt)")
+    parser.add_argument("--base", type=str, default="yolo26s.pt", help="Checkpoint gốc (mặc định yolo26s.pt)")
     parser.add_argument("--epochs", type=int, default=100, help="Số epochs huấn luyện (khuyến nghị 80 - 120)")
     parser.add_argument("--batch", type=int, default=16, help="Batch size (8, 16 hoặc 32 tùy GPU VRAM)")
     parser.add_argument("--imgsz", type=int, default=640, help="Kích thước ảnh đầu vào (mặc định 640)")
