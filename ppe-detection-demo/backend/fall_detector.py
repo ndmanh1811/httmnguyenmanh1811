@@ -1,8 +1,8 @@
 """
 fall_detector.py
 ----------------
-Bo phat hien nga nang cap: Su dung PoseFallDetector (YOLOv8-Pose 17 Keypoints).
-Ho tro tuong thich nguoc toan bo API cu:
+Bộ phát hiện ngã nâng cấp: Sử dụng PoseFallDetector (YOLO-Pose 17 Keypoints + PyTorch LSTM).
+Hỗ trợ tương thích ngược toàn bộ API cũ:
     - detect(frame) -> list[dict]
     - annotate_frame(frame, falls) -> frame
 """

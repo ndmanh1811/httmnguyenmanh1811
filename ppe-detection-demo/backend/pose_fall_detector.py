@@ -1,15 +1,11 @@
 """
-pose_fall_detector.py  —  v4 HYBRID 3-PATH
-------------------------------------------
-Kien truc 3-Path Ensemble cho fall detection:
-  Path A (Chinh)  : Bounding Box Dynamics — AR change, height drop, vertical velocity
-                     Hoat dong tot tu MOI goc camera (bao gom cam goc cao/noc xuong)
-  Path B (Bo tro) : Pose estimation — goc than, torso AR
-                     Chi tin khi keypoints confidence > 0.55
-  Path C (Boi canh): Motion burst — van toc roi dot ngot (impact detection)
-                     Phat hien nga nhanh trong 1-2 frame
-
-Quyet dinh nga: Neu 2/3 Path dong quyen -> bao nga (ensemble voting)
+pose_fall_detector.py  —  v5 HYBRID 3-PATH (YOLO26-Pose + PyTorch LSTM)
+-----------------------------------------------------------------------
+Kiến trúc 3-Path Ensemble cho phát hiện ngã thời gian thực:
+  Path A (Chính)  : Bounding Box Dynamics — AR change, height drop, vertical velocity
+  Path B (Bổ trợ) : Pose estimation — Khung xương 17 điểm COCO (Ưu tiên YOLO26s-Pose NMS-Free)
+  Path C (Bối cảnh): Motion burst & Inactivity — Vận tốc rơi đột ngột và bất động sau ngã
+  AI Model        : Mạng PyTorch LSTM chuỗi thời gian phân loại hành động ngã
 """
 
 from __future__ import annotations
@@ -57,7 +53,8 @@ def extract_lstm_features(kpts_array: np.ndarray) -> list[float]:
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-POSE_MODEL_PATH = os.path.join(BASE_DIR, "models_dir", "yolov8s-pose.pt")
+POSE_MODEL_YOLO26 = os.path.join(BASE_DIR, "models_dir", "yolo26s-pose.pt")
+POSE_MODEL_YOLOV8 = os.path.join(BASE_DIR, "models_dir", "yolov8s-pose.pt")
 
 KPT_CONF_THRESH = 0.45
 TORSO_AR_FALL_THRESH = 1.5
@@ -106,17 +103,19 @@ class PoseFallDetector:
         self._smoothing_factor: float = 0.75
         self._max_match_dist: float = 150.0
 
-        weights = "yolov8s-pose.pt"
-        if os.path.isfile(POSE_MODEL_PATH):
-            weights = POSE_MODEL_PATH
+        # Ưu tiên YOLO26s-Pose (NMS-Free, 63.0 mAP) -> YOLOv8s-Pose -> Tự động tải yolo26s-pose.pt
+        if os.path.isfile(POSE_MODEL_YOLO26):
+            weights = POSE_MODEL_YOLO26
+        elif os.path.isfile(POSE_MODEL_YOLOV8):
+            weights = POSE_MODEL_YOLOV8
+        elif os.path.isfile(os.path.join(BASE_DIR, "yolo26s-pose.pt")):
+            weights = os.path.join(BASE_DIR, "yolo26s-pose.pt")
         elif os.path.isfile(os.path.join(BASE_DIR, "yolov8s-pose.pt")):
             weights = os.path.join(BASE_DIR, "yolov8s-pose.pt")
-        elif os.path.isfile(os.path.join(BASE_DIR, "models_dir", "yolov8s-pose.pt")):
-            weights = os.path.join(BASE_DIR, "models_dir", "yolov8s-pose.pt")
-        elif os.path.isfile(os.path.join(BASE_DIR, "models_dir", "yolov8m-pose.pt")):
-            weights = os.path.join(BASE_DIR, "models_dir", "yolov8m-pose.pt")
+        else:
+            weights = "yolo26s-pose.pt"
 
-        logger.info("Initializing PoseFallDetector v4 HYBRID with model: %s", weights)
+        logger.info("Initializing PoseFallDetector v5 HYBRID with model: %s", weights)
         self.model = YOLO(weights)
 
         self._last_detected_persons: list[dict] = []

@@ -1,16 +1,16 @@
 """
 detector.py
 ------------
-Module phat hien vi pham an toan lao dong bang YOLOv8.
-Ho tro multi-class PPE: helmet, vest, mask.
+Hệ thống giám sát PPE YOLO (YOLO Multi-Class PPE Detection System).
+Hỗ trợ nhận diện đa lớp trang bị bảo hộ lao động: Mũ bảo hộ, Áo phản quang, Khẩu trang và Người.
+Tích hợp ByteTrack, Two-Stage Verification chống báo động giả khói/vật thể.
 
-Uu tien chon model theo thu tu:
-    1. models/best_hardhat.pt  -> model tu fine-tune
-    2. Neu khong co, tu tai model pretrained tu Hugging Face
-       ("keremberke/yolov8n-hard-hat-detection") -- can mang o lan dau.
+Ưu tiên nạp model theo thứ tự:
+    1. models_dir/best_hardhat.pt -> Model YOLO (YOLO26s / YOLOv8s) tự huấn luyện
+    2. Dự phòng trực tuyến qua Hugging Face nếu thiếu file weights cục bộ.
 
-Dataset huong dan: Construction Site Safety (Roboflow)
-    Lop: Hardhat, NO-Hardhat, Safety Vest, NO-Safety Vest, Mask, NO-Mask
+Bộ dữ liệu chuẩn: Construction Site Safety (Roboflow)
+    Lớp: Hardhat, NO-Hardhat, Safety Vest, NO-Safety Vest, Mask, NO-Mask, Person
 """
 
 from __future__ import annotations
