@@ -194,6 +194,9 @@ def train(
 
     model = YOLO(base_weights)
 
+    import torch
+
+    selected_device = device if device else (0 if torch.cuda.is_available() else "cpu")
     train_args = {
         "data": str(data_path),
         "epochs": epochs,
@@ -202,7 +205,7 @@ def train(
         "patience": patience,
         "save": True,
         "save_period": 10,
-        "device": device if device else (0 if model.device.type != "cpu" else "cpu"),
+        "device": selected_device,
         "project": project,
         "name": name,
         "exist_ok": True,
@@ -219,15 +222,18 @@ def train(
     if best_ckpt.is_file():
         print(f"\n[+] Huấn luyện thành công! File weights tốt nhất: {best_ckpt}")
 
-        # Tự động sao lưu model cũ và cập nhật model mới
-        MODELS_DIR.mkdir(parents=True, exist_ok=True)
-        if TARGET_MODEL_PATH.is_file():
-            backup_path = MODELS_DIR / "best_hardhat_backup.pt"
-            shutil.copy2(TARGET_MODEL_PATH, backup_path)
-            print(f"[*] Đã sao lưu model cũ -> {backup_path}")
+        # Tự động sao lưu và cập nhật model nếu chạy cục bộ
+        try:
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            if TARGET_MODEL_PATH.is_file():
+                backup_path = MODELS_DIR / "best_hardhat_backup.pt"
+                shutil.copy2(TARGET_MODEL_PATH, backup_path)
+                print(f"[*] Đã sao lưu model cũ -> {backup_path}")
 
-        shutil.copy2(best_ckpt, TARGET_MODEL_PATH)
-        print(f"✅ Đã triển khai weights mới vào hệ thống: {TARGET_MODEL_PATH}")
+            shutil.copy2(best_ckpt, TARGET_MODEL_PATH)
+            print(f"✅ Đã triển khai weights mới vào hệ thống: {TARGET_MODEL_PATH}")
+        except Exception as e:
+            print(f"[*] [Kaggle/Colab] Bạn có thể tải file weights tại: {best_ckpt.resolve()} ({e})")
     else:
         print("[!] Không tìm thấy file best.pt sau khi train.")
 
