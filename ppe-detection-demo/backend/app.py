@@ -266,7 +266,8 @@ def create_app():
                 from fire_detector import FireSmokeStreamAnalyzer
 
                 detector = get_detector()
-                fall_det = get_fall_detector() if enable_fall else None
+                # Luon khoi tao fall_detector lam backbone nhan dien nguoi (ngay ca khi user tat bao dong nga)
+                fall_det = get_fall_detector()
                 fire_stream_analyzer = None
                 if enable_fire:
                     shared_fire_model = get_fire_model()
@@ -296,6 +297,7 @@ def create_app():
                     fall_detector=fall_det,
                     fire_detector=fire_stream_analyzer,
                     enable_ppe=enable_ppe,
+                    enable_fall=enable_fall,
                     on_progress=on_progress,
                     cancel_event=cancel_event,
                     imgsz=imgsz,

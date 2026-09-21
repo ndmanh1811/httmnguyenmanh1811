@@ -143,6 +143,7 @@ class PPEDetector:
         fall_detector=None,
         fire_detector=None,
         enable_ppe: bool = True,
+        enable_fall: bool = True,
         on_progress: Callable[[int, int, float], None] | None = None,
         cancel_event: threading.Event | None = None,
         imgsz: int = 960,
@@ -216,6 +217,7 @@ class PPEDetector:
                     fire_detector=fire_detector,
                     timestamp=video_ts,
                     enable_ppe=enable_ppe,
+                    enable_fall=enable_fall,
                     imgsz=imgsz,
                 )
                 last_annotated = annotated
@@ -250,6 +252,7 @@ class PPEDetector:
         fire_detector=None,
         timestamp: float | None = None,
         enable_ppe: bool = True,
+        enable_fall: bool = True,
         imgsz: int = 640,
     ) -> tuple[Any, bool, dict, list, list, list, list]:
         """Chay detection va ByteTrack tren 1 frame, lien ket Nguoi - PPE, ve annotation thong minh."""
@@ -282,8 +285,10 @@ class PPEDetector:
         falls = []
         verified_pose_persons = []
         if fall_detector is not None:
-            falls = fall_detector.detect(frame, smoke_boxes=smoke_boxes, imgsz=imgsz)
+            detected_falls = fall_detector.detect(frame, smoke_boxes=smoke_boxes, imgsz=imgsz)
             verified_pose_persons = getattr(fall_detector, "last_detected_persons", [])
+            if enable_fall:
+                falls = detected_falls
 
         # 3. PPE DETECTION (Stage 1: Xac thuc nguoi; Stage 2: Danh gia PPE gan voi nguoi)
         if enable_ppe:
@@ -549,21 +554,24 @@ class PPEDetector:
                 cv2.putText(frame, person_tag, (px1 + 3, max(py1 - 5, 12)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
-        # Ve fall annotation SAU CUNG (sau PPE) — LUÔN vẽ skeleton
+        # Ve fall annotation SAU CUNG (sau PPE)
         if fall_detector is not None:
-            frame = fall_detector.annotate_frame(frame, falls)
+            if enable_fall:
+                frame = fall_detector.annotate_frame(frame, falls)
+            else:
+                frame = fall_detector.annotate_frame(frame, [])
 
         # Ve fire/smoke annotation SAU CUNG
         if fire_detector is not None and fires:
             frame = fire_detector.annotate_frame(frame, fires)
 
-        has_violation = (enable_ppe and len(violations) > 0) or len(falls) > 0 or len(fires) > 0
+        has_violation = (enable_ppe and len(violations) > 0) or (enable_fall and len(falls) > 0) or len(fires) > 0
 
         # Ưu tiên hiển thị cảnh báo: CHÁY/KHÓI > NGÃ > VI PHẠM PPE
         if fires:
             # fire_detector.annotate_frame da ve top emergency bar
             pass
-        elif falls:
+        elif enable_fall and falls:
             cv2.putText(frame, "CAP CUU: PHAT HIEN NGA BAT DONG!", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
         elif has_violation and enable_ppe:

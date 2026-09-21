@@ -185,8 +185,6 @@ class CameraManager:
                 run_inference = (self.frame_skip <= 1) or (frame_idx % self.frame_skip == 0)
 
                 if run_inference:
-                    active_fall_det = self.fall_detector if self.enable_fall else None
-
                     # Fire inference scheduling (interleaved based on fire_interval_frames)
                     run_fire = self.enable_fire and self.fire_analyzer is not None and (
                         (self.fire_interval_frames <= 1) or (frame_idx % self.fire_interval_frames == 0)
@@ -195,10 +193,11 @@ class CameraManager:
 
                     annotated, has_violation, ppe_stats, violations, falls, fires, all_person_ids = self.detector.annotate_frame(
                         frame,
-                        fall_detector=active_fall_det,
+                        fall_detector=self.fall_detector,
                         fire_detector=active_fire_det,
                         timestamp=now,
                         enable_ppe=self.enable_ppe,
+                        enable_fall=self.enable_fall,
                     )
                     last_annotated = annotated
 
