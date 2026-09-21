@@ -39,6 +39,8 @@ export default function UploadPage() {
   const [enablePpe, setEnablePpe] = useState(true)
   const [enableFall, setEnableFall] = useState(true)
   const [enableFire, setEnableFire] = useState(true)
+  const [useClahe, setUseClahe] = useState(true)
+  const [useSahi, setUseSahi] = useState(false)
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState(null)
   const [progress, setProgress] = useState(null)
@@ -147,6 +149,8 @@ export default function UploadPage() {
     formData.append('enable_ppe', enablePpe)
     formData.append('enable_fall', enableFall)
     formData.append('enable_fire', enableFire)
+    formData.append('use_clahe', useClahe)
+    formData.append('use_sahi', useSahi)
 
     // Append Exclusion Zones if any
     if (exclusionZones.length > 0) {
@@ -562,6 +566,32 @@ export default function UploadPage() {
           >
             <Flame className="w-4 h-4" />
             <span>Cháy & Khói {enableFire ? '✓' : ''}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setUseClahe(!useClahe)}
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer select-none ${
+              useClahe
+                ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-300 shadow-sm'
+                : 'bg-gray-800/60 border-gray-700 text-gray-400 opacity-60 hover:opacity-100'
+            }`}
+            title="Tự động cân bằng sáng cục bộ vùng bóng râm/góc tối để bắt rõ khung xương"
+          >
+            <span>🌓 Kéo sáng (CLAHE) {useClahe ? '✓' : ''}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setUseSahi(!useSahi)}
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer select-none ${
+              useSahi
+                ? 'bg-purple-500/20 border-purple-500/60 text-purple-300 shadow-sm'
+                : 'bg-gray-800/60 border-gray-700 text-gray-400 opacity-60 hover:opacity-100'
+            }`}
+            title="Cắt lát 4 phân vùng 2x2 để phóng đại và bắt trọn người ở khoảng cách xa"
+          >
+            <span>🔍 Cắt lát xa (SAHI) {useSahi ? '✓' : ''}</span>
           </button>
         </div>
       </div>

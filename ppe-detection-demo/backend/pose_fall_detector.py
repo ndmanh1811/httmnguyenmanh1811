@@ -23,6 +23,13 @@ import torch
 import torch.nn as nn
 from ultralytics import YOLO
 
+from enhancements import (
+    apply_adaptive_clahe,
+    slice_frame_2x2,
+    merge_sliced_pose_detections,
+    OneEuroPoseFilter,
+)
+
 class FallLSTM(nn.Module):
     def __init__(self, input_size: int = 51, hidden_size: int = 64, num_layers: int = 2, num_classes: int = 2):
         super(FallLSTM, self).__init__()
@@ -149,6 +156,7 @@ class PoseFallDetector:
         self._fall_latch: dict[int, int] = {}
         self._kpt_motion_history: dict[int, deque] = {}
         self._standing_height: dict[int, float] = {}
+        self._pose_filter = OneEuroPoseFilter()
 
     def reset(self) -> None:
         """Reset toàn bộ trạng thái tracking và phát hiện ngã khi bắt đầu video mới."""
@@ -162,6 +170,7 @@ class PoseFallDetector:
         self._fall_latch.clear()
         self._kpt_motion_history.clear()
         self._standing_height.clear()
+        self._pose_filter.reset()
         self._next_person_id = 1
         self._is_fall_confirmed = False
         self._last_fall_time = 0.0
@@ -203,29 +212,11 @@ class PoseFallDetector:
 
     def _smooth_keypoints(
         self,
+        pid: int,
         current_kpts: np.ndarray,
         prev_kpts: np.ndarray | None,
     ) -> np.ndarray:
-        if prev_kpts is None or prev_kpts.shape != current_kpts.shape:
-            return current_kpts.copy()
-
-        smoothed = current_kpts.copy()
-        for i in range(len(current_kpts)):
-            curr_conf = current_kpts[i][2]
-            prev_conf = prev_kpts[i][2]
-            if curr_conf >= KPT_CONF_THRESH and prev_conf >= KPT_CONF_THRESH:
-                smoothed[i][0] = (
-                    self._smoothing_factor * current_kpts[i][0]
-                    + (1 - self._smoothing_factor) * prev_kpts[i][0]
-                )
-                smoothed[i][1] = (
-                    self._smoothing_factor * current_kpts[i][1]
-                    + (1 - self._smoothing_factor) * prev_kpts[i][1]
-                )
-            elif curr_conf < KPT_CONF_THRESH and prev_conf >= KPT_CONF_THRESH:
-                smoothed[i][0] = prev_kpts[i][0]
-                smoothed[i][1] = prev_kpts[i][1]
-        return smoothed
+        return self._pose_filter.smooth_pose(pid, current_kpts, dt=1.0 / 25.0, kpt_conf_thresh=KPT_CONF_THRESH)
 
     # ------------------------------------------------------------------
     # Pose helpers (Path B)
@@ -736,43 +727,61 @@ class PoseFallDetector:
             self._fall_latch.pop(stale_pid, None)
             self._kpt_motion_history.pop(stale_pid, None)
             self._standing_height.pop(stale_pid, None)
+        self._pose_filter.cleanup_stale(active_pids)
 
     # ------------------------------------------------------------------
     # Detect chinh
     # ------------------------------------------------------------------
 
-    def detect(self, frame: Any, smoke_boxes: list | None = None, imgsz: int | None = None) -> list[dict]:
+    def detect(
+        self,
+        frame: Any,
+        smoke_boxes: list | None = None,
+        imgsz: int | None = None,
+        use_clahe: bool = True,
+        use_sahi: bool = False,
+    ) -> list[dict]:
+        proc_frame = apply_adaptive_clahe(frame) if (use_clahe and frame is not None and getattr(frame, "size", 0) > 0) else frame
+
         predict_kwargs: dict[str, Any] = {"conf": self.conf, "verbose": False}
         if imgsz is not None:
             predict_kwargs["imgsz"] = imgsz
-        results = self.model.predict(frame, **predict_kwargs)
+        results = self.model.predict(proc_frame, **predict_kwargs)
         falls: list[dict] = []
         self._last_detected_persons = []
 
-        if not results or len(results) == 0:
+        global_bboxes: list[list[int]] = []
+        global_confs: list[float] = []
+        global_kpts: list[np.ndarray] = []
+
+        if results and len(results) > 0:
+            r = results[0]
+            if r.boxes is not None and len(r.boxes) > 0 and r.keypoints is not None:
+                global_bboxes = [list(map(int, b.xyxy[0])) for b in r.boxes]
+                global_confs = [float(b.conf[0]) for b in r.boxes]
+                global_kpts = [k for k in r.keypoints.data.cpu().numpy()]
+
+        # SAHI Tiled Slicing if enabled
+        if use_sahi and proc_frame is not None and getattr(proc_frame, "size", 0) > 0:
+            slice_imgs, slice_coords = slice_frame_2x2(proc_frame)
+            slice_res = self.model.predict(slice_imgs, conf=self.conf, imgsz=640, verbose=False)
+            global_bboxes, global_confs, global_kpts = merge_sliced_pose_detections(
+                global_bboxes, global_confs, global_kpts, slice_res, slice_coords, iou_thresh=0.35
+            )
+
+        if not global_bboxes:
             self._prev_persons = []
             self._cleanup_stale(set())
             return falls
 
-        r = results[0]
-        boxes = r.boxes
-        keypoints_data = r.keypoints
-
-        if boxes is None or len(boxes) == 0 or keypoints_data is None:
-            self._prev_persons = []
-            self._cleanup_stale(set())
-            return falls
-
-        kpts_array = keypoints_data.data.cpu().numpy()
-        all_bboxes: list[list[int]] = [list(map(int, b.xyxy[0])) for b in boxes]
-        matched_prev = self._match_to_prev(all_bboxes)
+        matched_prev = self._match_to_prev(global_bboxes)
         new_prev_persons: list[dict] = []
         active_pids: set[int] = set()
 
-        for i, box in enumerate(boxes):
-            conf = float(box.conf[0])
-            x1, y1, x2, y2 = all_bboxes[i]
-            raw_kpts = kpts_array[i]
+        for i in range(len(global_bboxes)):
+            conf = global_confs[i]
+            x1, y1, x2, y2 = global_bboxes[i]
+            raw_kpts = global_kpts[i]
 
             # Kiem tra xem candidate box co nam trong vung khoi hoac lua khong
             is_in_smoke = False
@@ -789,7 +798,7 @@ class PoseFallDetector:
                             break
 
             # Kiem tra tinh toan ven cua khung xuong nguoi that (loai bo ao giac khoi/vat the)
-            is_valid_human, reason = self._is_valid_human_skeleton(raw_kpts, [x1, y1, x2, y2], frame=frame, is_in_smoke=is_in_smoke)
+            is_valid_human, reason = self._is_valid_human_skeleton(raw_kpts, [x1, y1, x2, y2], frame=proc_frame, is_in_smoke=is_in_smoke)
             if not is_valid_human:
                 logger.debug("Bo qua candidate pose khong phai nguoi that: %s", reason)
                 continue
@@ -803,7 +812,7 @@ class PoseFallDetector:
             active_pids.add(pid)
 
             prev_kpts = self._prev_persons[prev_idx]["kpts"] if prev_idx is not None else None
-            kpts = self._smooth_keypoints(raw_kpts, prev_kpts)
+            kpts = self._smooth_keypoints(pid, raw_kpts, prev_kpts)
 
             # Path A: BB Dynamics
             self._update_bb_history(pid, [x1, y1, x2, y2])

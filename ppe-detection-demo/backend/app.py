@@ -246,6 +246,8 @@ def create_app():
         enable_ppe = _get_form_bool("enable_ppe", True)
         enable_fall = _get_form_bool("enable_fall", True)
         enable_fire = _get_form_bool("enable_fire", True)
+        use_clahe = _get_form_bool("use_clahe", True)
+        use_sahi = _get_form_bool("use_sahi", False)
 
         try:
             imgsz = int(request.form.get("imgsz", 960))
@@ -301,6 +303,8 @@ def create_app():
                     on_progress=on_progress,
                     cancel_event=cancel_event,
                     imgsz=imgsz,
+                    use_clahe=use_clahe,
+                    use_sahi=use_sahi,
                 )
 
                 if cancel_event.is_set():

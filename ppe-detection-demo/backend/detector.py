@@ -26,6 +26,8 @@ import imageio
 from huggingface_hub import hf_hub_download
 from ultralytics import YOLO
 
+from enhancements import apply_adaptive_clahe
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -147,6 +149,8 @@ class PPEDetector:
         on_progress: Callable[[int, int, float], None] | None = None,
         cancel_event: threading.Event | None = None,
         imgsz: int = 960,
+        use_clahe: bool = True,
+        use_sahi: bool = False,
     ) -> dict[str, int]:
         """Doc video, chay detection, ghi video ket qua, tra ve thong ke."""
         cap = cv2.VideoCapture(input_path)
@@ -219,6 +223,8 @@ class PPEDetector:
                     enable_ppe=enable_ppe,
                     enable_fall=enable_fall,
                     imgsz=imgsz,
+                    use_clahe=use_clahe,
+                    use_sahi=use_sahi,
                 )
                 last_annotated = annotated
                 stats["processed_frames"] += 1
@@ -254,6 +260,8 @@ class PPEDetector:
         enable_ppe: bool = True,
         enable_fall: bool = True,
         imgsz: int = 640,
+        use_clahe: bool = True,
+        use_sahi: bool = False,
     ) -> tuple[Any, bool, dict, list, list, list, list]:
         """Chay detection va ByteTrack tren 1 frame, lien ket Nguoi - PPE, ve annotation thong minh."""
         ppe_stats: dict[str, dict[str, int]] = {
@@ -285,13 +293,20 @@ class PPEDetector:
         falls = []
         verified_pose_persons = []
         if fall_detector is not None:
-            detected_falls = fall_detector.detect(frame, smoke_boxes=smoke_boxes, imgsz=imgsz)
+            detected_falls = fall_detector.detect(
+                frame,
+                smoke_boxes=smoke_boxes,
+                imgsz=imgsz,
+                use_clahe=use_clahe,
+                use_sahi=use_sahi,
+            )
             verified_pose_persons = getattr(fall_detector, "last_detected_persons", [])
             if enable_fall:
                 falls = detected_falls
 
         # 3. PPE DETECTION (Stage 1: Xac thuc nguoi; Stage 2: Danh gia PPE gan voi nguoi)
         if enable_ppe:
+            ppe_frame = apply_adaptive_clahe(frame) if (use_clahe and frame is not None and getattr(frame, "size", 0) > 0) else frame
             track_kwargs: dict[str, Any] = {
                 "conf": self.conf,
                 "iou": self.iou,
@@ -299,9 +314,9 @@ class PPEDetector:
                 "verbose": False,
             }
             try:
-                results = self.model.track(frame, persist=True, tracker="bytetrack.yaml", **track_kwargs)
+                results = self.model.track(ppe_frame, persist=True, tracker="bytetrack.yaml", **track_kwargs)
             except Exception:
-                results = self.model.predict(frame, conf=self.conf, iou=self.iou, imgsz=imgsz, verbose=False)
+                results = self.model.predict(ppe_frame, conf=self.conf, iou=self.iou, imgsz=imgsz, verbose=False)
 
             r = results[0]
             boxes = r.boxes
