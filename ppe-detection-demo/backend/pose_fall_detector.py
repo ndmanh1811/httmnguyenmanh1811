@@ -150,6 +150,22 @@ class PoseFallDetector:
         self._kpt_motion_history: dict[int, deque] = {}
         self._standing_height: dict[int, float] = {}
 
+    def reset(self) -> None:
+        """Reset toàn bộ trạng thái tracking và phát hiện ngã khi bắt đầu video mới."""
+        self._last_detected_persons.clear()
+        self._prev_persons.clear()
+        self._bb_history.clear()
+        self._cy_history.clear()
+        self._fall_frames.clear()
+        self._lstm_history.clear()
+        self._fall_candidates.clear()
+        self._fall_latch.clear()
+        self._kpt_motion_history.clear()
+        self._standing_height.clear()
+        self._next_person_id = 1
+        self._is_fall_confirmed = False
+        self._last_fall_time = 0.0
+
 
     # ------------------------------------------------------------------
     # Matching

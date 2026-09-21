@@ -223,6 +223,12 @@ def create_app():
         input_path = os.path.join(app.config["UPLOAD_FOLDER"], input_name)
         file.save(input_path)
 
+        # Tự động hủy toàn bộ tiến trình phân tích video cũ còn đang chạy để giải phóng GPU/CPU
+        for old_uid, old_event in list(_active_uploads.items()):
+            old_event.set()
+            logger.info("Auto-cancelled previous active upload before starting new one: %s", old_uid)
+        _active_uploads.clear()
+
         frame_skip = int(request.form.get("frame_skip", 2))
         upload_id = uuid.uuid4().hex
         cancel_event = threading.Event()
@@ -317,10 +323,18 @@ def create_app():
     def detect_cancel():
         data = request.get_json(silent=True) or {}
         upload_id = data.get("upload_id")
+        cancelled_count = 0
         if upload_id and upload_id in _active_uploads:
             _active_uploads[upload_id].set()
-            return jsonify({"ok": True})
-        return jsonify({"error": "Not found"}), 404
+            cancelled_count += 1
+            logger.info("Cancelled specific upload: %s", upload_id)
+        else:
+            # Hủy tất cả các tiến trình upload video đang chạy nếu không truyền upload_id cụ thể
+            for uid, ev in list(_active_uploads.items()):
+                ev.set()
+                cancelled_count += 1
+                logger.info("Cancelled running upload: %s", uid)
+        return jsonify({"ok": True, "cancelled_count": cancelled_count})
 
     @app.route("/api/webcam_stream")
     def webcam_stream():

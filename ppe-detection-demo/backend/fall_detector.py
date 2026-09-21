@@ -45,3 +45,8 @@ class FallDetector:
     def last_detected_persons(self) -> list[dict]:
         """Danh sach tat ca nguoi da duoc xac thuc khung xuong trong frame gan nhat."""
         return getattr(self._impl, "_last_detected_persons", [])
+
+    def reset(self) -> None:
+        """Reset trạng thái phát hiện ngã khi bắt đầu video mới."""
+        if hasattr(self._impl, "reset"):
+            self._impl.reset()

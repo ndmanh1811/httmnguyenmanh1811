@@ -70,8 +70,8 @@ export default function UploadPage() {
     socketRef.current = socket
 
     socket.on('upload_progress', (data) => {
-      if (uploadIdRef.current && data.upload_id !== uploadIdRef.current) return
-      if (!uploadIdRef.current) uploadIdRef.current = data.upload_id
+      // Chỉ nhận progress của đúng upload_id đang active, bỏ qua toàn bộ progress từ tiến trình cũ
+      if (!uploadIdRef.current || data.upload_id !== uploadIdRef.current) return
       setProgress(data)
     })
 
@@ -108,9 +108,15 @@ export default function UploadPage() {
   }, [file])
 
   const handleCancel = async () => {
-    if (uploadIdRef.current) {
-      try { await api.post('/detect/cancel', { upload_id: uploadIdRef.current }) } catch {}
-    }
+    const currentId = uploadIdRef.current
+    // Reset UI state ngay lập tức để người dùng không bị kẹt giao diện
+    uploadIdRef.current = null
+    setLoading(false)
+    setProgress(null)
+    setCancelled(true)
+    try {
+      await api.post('/detect/cancel', { upload_id: currentId })
+    } catch {}
   }
 
   const handleUpload = async () => {
@@ -120,10 +126,18 @@ export default function UploadPage() {
       return
     }
 
+    // Nếu đang có tiến trình cũ, gửi lệnh hủy trước khi bắt đầu phân tích mới
+    if (uploadIdRef.current) {
+      try {
+        await api.post('/detect/cancel', { upload_id: uploadIdRef.current })
+      } catch {}
+    }
+
     setLoading(true)
     setProgress(null)
     setResult(null)
     setCancelled(false)
+    uploadIdRef.current = null
 
     const formData = new FormData()
     formData.append('video', file)
@@ -145,6 +159,7 @@ export default function UploadPage() {
     } catch (err) {
       alert('Lỗi: ' + (err.response?.data?.error || err.message))
       setLoading(false)
+      uploadIdRef.current = null
     }
   }
 

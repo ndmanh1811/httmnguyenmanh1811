@@ -175,6 +175,8 @@ class PPEDetector:
         )
 
         self._ppe_memory.clear()
+        if fall_detector and hasattr(fall_detector, "reset"):
+            fall_detector.reset()
         stats = {
             "total_frames": 0,
             "processed_frames": 0,
