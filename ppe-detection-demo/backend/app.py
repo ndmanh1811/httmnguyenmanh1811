@@ -247,6 +247,11 @@ def create_app():
         enable_fall = _get_form_bool("enable_fall", True)
         enable_fire = _get_form_bool("enable_fire", True)
 
+        try:
+            imgsz = int(request.form.get("imgsz", 960))
+        except (ValueError, TypeError):
+            imgsz = 960
+
         raw_zones = request.form.get("exclusion_zones")
         exclusion_zones = []
         if raw_zones:
@@ -293,6 +298,7 @@ def create_app():
                     enable_ppe=enable_ppe,
                     on_progress=on_progress,
                     cancel_event=cancel_event,
+                    imgsz=imgsz,
                 )
 
                 if cancel_event.is_set():

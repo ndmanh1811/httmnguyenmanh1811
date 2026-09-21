@@ -119,7 +119,7 @@ def _calc_box_iou(b1: list[int], b2: list[int]) -> float:
 
 
 class PPEDetector:
-    def __init__(self, conf: float = 0.35, iou: float = 0.45) -> None:
+    def __init__(self, conf: float = 0.28, iou: float = 0.45) -> None:
         if os.path.isfile(LOCAL_WEIGHTS):
             logger.info("Dung model tu train: %s", LOCAL_WEIGHTS)
             weights_path = LOCAL_WEIGHTS
@@ -145,6 +145,7 @@ class PPEDetector:
         enable_ppe: bool = True,
         on_progress: Callable[[int, int, float], None] | None = None,
         cancel_event: threading.Event | None = None,
+        imgsz: int = 960,
     ) -> dict[str, int]:
         """Doc video, chay detection, ghi video ket qua, tra ve thong ke."""
         cap = cv2.VideoCapture(input_path)
@@ -215,6 +216,7 @@ class PPEDetector:
                     fire_detector=fire_detector,
                     timestamp=video_ts,
                     enable_ppe=enable_ppe,
+                    imgsz=imgsz,
                 )
                 last_annotated = annotated
                 stats["processed_frames"] += 1
@@ -248,6 +250,7 @@ class PPEDetector:
         fire_detector=None,
         timestamp: float | None = None,
         enable_ppe: bool = True,
+        imgsz: int = 640,
     ) -> tuple[Any, bool, dict, list, list, list, list]:
         """Chay detection va ByteTrack tren 1 frame, lien ket Nguoi - PPE, ve annotation thong minh."""
         ppe_stats: dict[str, dict[str, int]] = {
@@ -279,15 +282,21 @@ class PPEDetector:
         falls = []
         verified_pose_persons = []
         if fall_detector is not None:
-            falls = fall_detector.detect(frame, smoke_boxes=smoke_boxes)
+            falls = fall_detector.detect(frame, smoke_boxes=smoke_boxes, imgsz=imgsz)
             verified_pose_persons = getattr(fall_detector, "last_detected_persons", [])
 
         # 3. PPE DETECTION (Stage 1: Xac thuc nguoi; Stage 2: Danh gia PPE gan voi nguoi)
         if enable_ppe:
+            track_kwargs: dict[str, Any] = {
+                "conf": self.conf,
+                "iou": self.iou,
+                "imgsz": imgsz,
+                "verbose": False,
+            }
             try:
-                results = self.model.track(frame, persist=True, tracker="bytetrack.yaml", conf=self.conf, iou=self.iou, verbose=False)
+                results = self.model.track(frame, persist=True, tracker="bytetrack.yaml", **track_kwargs)
             except Exception:
-                results = self.model.predict(frame, conf=self.conf, iou=self.iou, verbose=False)
+                results = self.model.predict(frame, conf=self.conf, iou=self.iou, imgsz=imgsz, verbose=False)
 
             r = results[0]
             boxes = r.boxes

@@ -35,6 +35,7 @@ export default function UploadPage() {
   const [file, setFile] = useState(null)
   const [previewUrl, setPreviewUrl] = useState(null)
   const [frameSkip, setFrameSkip] = useState(2)
+  const [imgsz, setImgsz] = useState(960)
   const [enablePpe, setEnablePpe] = useState(true)
   const [enableFall, setEnableFall] = useState(true)
   const [enableFire, setEnableFire] = useState(true)
@@ -142,6 +143,7 @@ export default function UploadPage() {
     const formData = new FormData()
     formData.append('video', file)
     formData.append('frame_skip', frameSkip)
+    formData.append('imgsz', imgsz)
     formData.append('enable_ppe', enablePpe)
     formData.append('enable_fall', enableFall)
     formData.append('enable_fire', enableFire)
@@ -564,8 +566,8 @@ export default function UploadPage() {
         </div>
       </div>
 
-      {/* Speed & Action Buttons */}
-      <div className="flex items-center gap-4">
+      {/* Speed & Resolution & Action Buttons */}
+      <div className="flex flex-wrap items-center gap-4">
         <div>
           <label className="text-sm text-gray-400 mr-2">Tốc độ:</label>
           <select
@@ -573,9 +575,21 @@ export default function UploadPage() {
             onChange={(e) => setFrameSkip(Number(e.target.value))}
             className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"
           >
-            <option value={1}>Chính xác nhất</option>
-            <option value={2}>Cân bằng</option>
-            <option value={5}>Nhanh</option>
+            <option value={1}>Chính xác nhất (Mọi khung hình)</option>
+            <option value={2}>Cân bằng (Khuyên dùng)</option>
+            <option value={5}>Nhanh (Bỏ cách 5 khung hình)</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-sm text-gray-400 mr-2">Độ phân giải:</label>
+          <select
+            value={imgsz}
+            onChange={(e) => setImgsz(Number(e.target.value))}
+            className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"
+          >
+            <option value={960}>960p (Mặc định - Bắt người ở xa/vùng tối)</option>
+            <option value={640}>640p (Tiêu chuẩn - Tối ưu tốc độ)</option>
+            <option value={1280}>1280p (Cực cao - Siêu chi tiết)</option>
           </select>
         </div>
         <button

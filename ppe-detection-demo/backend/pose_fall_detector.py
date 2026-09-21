@@ -91,7 +91,7 @@ SKELETON_PAIRS = [
 class PoseFallDetector:
     def __init__(
         self,
-        conf: float = 0.50,
+        conf: float = 0.25,
         angle_threshold: float = 50.0,
         aspect_ratio_threshold: float = 1.05,
         required_consecutive_frames: int = 2,
@@ -741,8 +741,11 @@ class PoseFallDetector:
     # Detect chinh
     # ------------------------------------------------------------------
 
-    def detect(self, frame: Any, smoke_boxes: list | None = None) -> list[dict]:
-        results = self.model.predict(frame, conf=self.conf, verbose=False)
+    def detect(self, frame: Any, smoke_boxes: list | None = None, imgsz: int | None = None) -> list[dict]:
+        predict_kwargs: dict[str, Any] = {"conf": self.conf, "verbose": False}
+        if imgsz is not None:
+            predict_kwargs["imgsz"] = imgsz
+        results = self.model.predict(frame, **predict_kwargs)
         falls: list[dict] = []
         self._last_detected_persons = []
 

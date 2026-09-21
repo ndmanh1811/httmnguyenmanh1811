@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class FallDetector:
     def __init__(
         self,
-        conf: float = 0.50,
+        conf: float = 0.25,
         angle_threshold: float = 50.0,
         aspect_ratio_threshold: float = 1.15,
         required_consecutive_frames: int = 2,
@@ -33,9 +33,9 @@ class FallDetector:
             required_consecutive_frames=required_consecutive_frames,
         )
 
-    def detect(self, frame: Any, smoke_boxes: list | None = None) -> list[dict]:
+    def detect(self, frame: Any, smoke_boxes: list | None = None, imgsz: int | None = None) -> list[dict]:
         """Phat hien nga dong hoc dua tren goc than minh va thoi gian bat dong."""
-        return self._impl.detect(frame, smoke_boxes=smoke_boxes)
+        return self._impl.detect(frame, smoke_boxes=smoke_boxes, imgsz=imgsz)
 
     def annotate_frame(self, frame: Any, falls: list[dict]) -> Any:
         """Ve khung xuong va thong bao tai nan nga len khung hinh."""
