@@ -26,21 +26,23 @@ class TestSkeletonSmokeSuppression(unittest.TestCase):
     def setUp(self):
         self.detector = PoseFallDetector()
     
-    def _make_smoke_kpts(self):
-        """Tao keypoints gia lap khói: mo, khong co vai/hong, cum 1 ben (du >=6 diem nhung thieu torso core)."""
+    def _make_smoke_kpts_no_torso(self):
+        """Tao keypoints gia lap khói: co 6+ diem nhung THIEU vai/hong (de test torso core)."""
         kpts = np.zeros((17, 3), dtype=np.float32)
-        # 7 diem roi rac (nose, eyes, ears, knees) voi conf >= 0.50 nhung KHONG co vai (5,6) va hong (11,12)
+        # 7 diem: nose, eyes, ears, knees (co conf >= 0.45) nhung KHONG co vai (5,6) va hong (11,12)
         for idx in [0, 1, 2, 3, 4, 13, 14]:
-            kpts[idx] = [120, 110 + idx * 5, 0.60]
+            kpts[idx] = [120 + idx, 110 + idx * 5, 0.60]
         return kpts
-
-    def _make_narrow_span_kpts(self):
-        """Tao keypoints co vai/hong nhung cum 1 ben (span < 20% bbox)."""
+    
+    def _make_smoke_kpts_narrow_span(self):
+        """Tao keypoints co vai/hong nhung cum 1 ben (span < 20% bbox) - de test anatomical span."""
         kpts = np.zeros((17, 3), dtype=np.float32)
         # Bbox: [100, 100, 250, 250] (w=150, h=150)
         # Tat ca diem nam trong vung 10x10 -> span ~ 6% < 20%
+        # Co vai (5,6), hong (11,12) voi conf >= 0.45 de pass torso core
+        base = np.array([110, 110], dtype=np.float32)
         for idx in [0, 5, 6, 11, 12, 13, 14]:
-            kpts[idx] = [110 + (idx % 3), 110 + (idx // 3), 0.80]
+            kpts[idx] = [base[0] + (idx % 3), base[1] + (idx // 3), 0.80]
         return kpts
     
     def _make_person_kpts(self):
@@ -58,23 +60,21 @@ class TestSkeletonSmokeSuppression(unittest.TestCase):
         return kpts
     
     def _make_frame(self, sharp=True):
-        """Tao frame test: sharp (nét) hoặc blurry (mờ như khói)."""
+        """Tao frame test: sharp (net) hoac blurry (mo giong khói)."""
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         if sharp:
-            # Ve hinh chu nhat nét
             cv2.rectangle(frame, (100, 100), (300, 350), (200, 200, 200), -1)
             cv2.rectangle(frame, (100, 100), (300, 350), (255, 255, 255), 2)
         else:
-            # Mo giong khói
             cv2.rectangle(frame, (100, 100), (300, 350), (120, 120, 120), -1)
             frame = cv2.GaussianBlur(frame, (15, 15), 10)
         return frame
     
     def test_smoke_keypoints_rejected_by_torso_core(self):
-        """Khói không có vai/hông conf >= 0.45 -> bi reject."""
-        kpts = self._make_smoke_kpts()
+        """Khói khong co vai/hong conf >= 0.45 -> bi reject bang torso core check."""
+        kpts = self._make_smoke_kpts_no_torso()
         bbox = [100, 100, 250, 250]
-        frame = self._make_frame(sharp=True)
+        frame = self._make_frame(sharp=False)
         
         valid, reason = self.detector._is_valid_human_skeleton(
             kpts, bbox, frame=frame, is_in_smoke=True, track_id=1, require_temporal=False
@@ -83,10 +83,10 @@ class TestSkeletonSmokeSuppression(unittest.TestCase):
         self.assertIn("torso core", reason.lower())
     
     def test_smoke_keypoints_rejected_by_anatomical_span(self):
-        """Khói cum 1 ben (span < 20%) -> bi reject bang logic OR."""
-        kpts = self._make_narrow_span_kpts()
+        """Khói co vai/hong nhung cum 1 ben (span < 20%) -> bi reject bang logic OR."""
+        kpts = self._make_smoke_kpts_narrow_span()
         bbox = [100, 100, 250, 250]
-        frame = self._make_frame(sharp=True)  # Frame nét nhưng keypoints cum 1 ben
+        frame = self._make_frame(sharp=True)
         
         valid, reason = self.detector._is_valid_human_skeleton(
             kpts, bbox, frame=frame, is_in_smoke=True, track_id=2, require_temporal=False
@@ -96,9 +96,9 @@ class TestSkeletonSmokeSuppression(unittest.TestCase):
     
     def test_smoke_keypoints_rejected_by_laplacian(self):
         """Khói mo co Laplacian < 25 -> bi reject."""
-        kpts = self._make_person_kpts()  # Keypoints dung dang nguoi
+        kpts = self._make_person_kpts()
         bbox = [100, 100, 250, 350]
-        frame = self._make_frame(sharp=False)  # Frame mo giong khói
+        frame = self._make_frame(sharp=False)
         
         valid, reason = self.detector._is_valid_human_skeleton(
             kpts, bbox, frame=frame, is_in_smoke=True, track_id=3, require_temporal=False
@@ -138,7 +138,7 @@ class TestSkeletonSmokeSuppression(unittest.TestCase):
     def test_temporal_reset_on_invalid(self):
         """Neu frame n hop le nhung frame n+1 khong hop le -> counter reset."""
         kpts_good = self._make_person_kpts()
-        kpts_bad = self._make_smoke_kpts()
+        kpts_bad = self._make_smoke_kpts_no_torso()
         bbox = [100, 100, 250, 350]
         frame = self._make_frame(sharp=True)
         
@@ -177,21 +177,21 @@ class TestFireSmokeSceneCut(unittest.TestCase):
     
     def test_scene_cut_clears_verified_in_two_frames(self):
         """Khi 0 candidate 2 frame lien tiep -> verified tracks bi force-clear."""
-        # Tao track verified gia (last_seen=100.0)
+        # Tao track verified gia
         self.analyzer._tracks[1] = self._make_verified_track(1, "smoke")
         
-        # Frame 1: 0 candidate (timestamp=100.1, delta=0.1s < 0.5s stale)
+        # Frame 1: 0 candidate
         result1 = self.analyzer.detect(
             np.zeros((480, 640, 3), dtype=np.uint8),
-            timestamp=100.1
+            timestamp=100.5
         )
         # Track van verified (chi 1 frame 0 candidate)
         self.assertTrue(self.analyzer._tracks[1].get("verified", False))
         
-        # Frame 2: 0 candidate (timestamp=100.2, delta=0.2s < 0.5s stale) -> force clear
+        # Frame 2: 0 candidate -> force clear
         result2 = self.analyzer.detect(
             np.zeros((480, 640, 3), dtype=np.uint8),
-            timestamp=100.2
+            timestamp=101.0
         )
         # Track phai bi clear verified
         self.assertFalse(self.analyzer._tracks[1].get("verified", False))
@@ -215,7 +215,7 @@ class TestFireSmokeSceneCut(unittest.TestCase):
             
             # Frame 2: sau 0.6s -> phai clear
             result2 = self.analyzer.detect(frame, timestamp=100.8)
-            self.assertFalse(self.analyzer._tracks.get(1, {}).get("verified", False))
+            self.assertFalse(self.analyzer._tracks[1].get("verified", False))
         finally:
             self.analyzer.smoke_scorer.calculate = original_calc
     

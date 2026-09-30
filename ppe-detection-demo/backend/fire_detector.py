@@ -1008,6 +1008,12 @@ class FireSmokeStreamAnalyzer:
         # Update last gray frame for next optical flow step
         self._last_gray_frame = curr_gray
 
+        # Cap nhat last_seen cho cac track da verified de tranh bi xoa boi stale cleanup
+        # khi dang trong trang thai zero-candidate (scene cut)
+        for tid, track in self._tracks.items():
+            if track.get("verified", False):
+                track["last_seen"] = timestamp
+
         # Scene Change / Zero-Candidate Detection:
         # Nếu không có candidate nào trong frame nay -> tang zero_candidate_frames
         # Neu >= 2 frame lien tiep khong co candidate -> force clear verified tracks (scene cut)
