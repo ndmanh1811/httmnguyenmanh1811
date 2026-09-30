@@ -427,8 +427,7 @@ class PoseFallDetector:
 
         min_required = 6 if is_in_smoke else 4
         if num_valid < min_required:
-            # Reset temporal counter on invalid
-            if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames:
+            if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames and self._skeleton_valid_frames[track_id] >= 1:
                 del self._skeleton_valid_frames[track_id]
             return False, f"Keypoint count too low ({num_valid} < {min_required})"
 
@@ -440,7 +439,7 @@ class PoseFallDetector:
         if is_in_smoke:
             # Trong khói: bat buoc phai co TORSO CORE (vai + hông) voi conf >= 0.45
             if not (has_shoulder and has_hip):
-                if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames:
+                if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames and self._skeleton_valid_frames[track_id] >= 1:
                     del self._skeleton_valid_frames[track_id]
                 return False, "Missing human torso core in smoke (shoulders AND hips required)"
 
@@ -448,7 +447,7 @@ class PoseFallDetector:
         l_knee, r_knee = kpts[13][2], kpts[14][2]
         has_lower_body = has_hip or (l_knee >= min_kpt_conf or r_knee >= min_kpt_conf)
         if is_in_smoke and not has_lower_body:
-            if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames:
+            if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames and self._skeleton_valid_frames[track_id] >= 1:
                 del self._skeleton_valid_frames[track_id]
             return False, "Missing lower body (smoke phantom has no hips/legs)"
 
@@ -464,7 +463,7 @@ class PoseFallDetector:
                 # Ngưỡng adaptive: 25 khi co smoke overlap, 20 mặc định
                 lap_threshold = 25.0 if is_in_smoke else 20.0
                 if lap_var < lap_threshold:
-                    if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames:
+                    if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames and self._skeleton_valid_frames[track_id] >= 1:
                         del self._skeleton_valid_frames[track_id]
                     return False, f"Blurry texture like smoke (Laplacian={lap_var:.1f} < {lap_threshold})"
 
@@ -479,7 +478,7 @@ class PoseFallDetector:
 
         # Logic OR: nếu width < 20% HOẶC height < 20% -> reject (khói vệt ngang hoặc dọc)
         if (kpt_w / bw < 0.20) or (kpt_h / bh < 0.20):
-            if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames:
+            if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames and self._skeleton_valid_frames[track_id] >= 1:
                 del self._skeleton_valid_frames[track_id]
             return False, f"Keypoints span too narrow (w={kpt_w/bw:.2f}, h={kpt_h/bh:.2f} < 0.20)"
 
@@ -955,9 +954,7 @@ class PoseFallDetector:
             )
             if not is_valid_human:
                 logger.debug("Bo qua candidate pose khong phai nguoi that: %s", reason)
-                # Reset temporal counter for invalid skeleton
-                if candidate_pid in self._skeleton_valid_frames:
-                    del self._skeleton_valid_frames[candidate_pid]
+                # KHONG xoa temporal counter o day - de no tu reset trong _cleanup_stale khi track mat
                 continue
 
             pid = candidate_pid
