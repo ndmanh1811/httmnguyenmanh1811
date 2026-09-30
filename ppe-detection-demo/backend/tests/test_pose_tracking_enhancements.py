@@ -243,5 +243,56 @@ class TestPostureColorStates(unittest.TestCase):
         self.assertGreaterEqual(dur_5s, 5.0)
 
 
+class TestByteTrackSpatialIoUMatching(unittest.TestCase):
+    def setUp(self):
+        self.detector = PoseFallDetector()
+
+    def test_frame1_bytetrack_id_assignment(self):
+        """Frame 1 (empty _prev_persons) must still match via Spatial IoU and assign ByteTrack ID."""
+        self.detector._prev_persons = []
+        new_bboxes = [[100, 100, 200, 300]]
+        ppe_items = [{"id": 42, "bbox": [100, 100, 200, 300]}]
+        matched = self.detector._match_to_prev(new_bboxes, ppe_track_items=ppe_items)
+        self.assertEqual(matched, ["BYTE_ID:42"], "Frame 1 must yield BYTE_ID marker with ByteTrack ID")
+
+    def test_duplicate_bytetrack_item_matching_priority(self):
+        """When 2 pose bboxes overlap 1 PPE item, higher IoU wins and the other falls back."""
+        self.detector._prev_persons = []
+        # bbox 0 has moderate overlap (~0.45), bbox 1 has high overlap (~0.85)
+        new_bboxes = [
+            [130, 100, 230, 300],
+            [105, 102, 202, 301],
+        ]
+        ppe_items = [{"id": 99, "bbox": [100, 100, 200, 300]}]
+        matched = self.detector._match_to_prev(new_bboxes, ppe_track_items=ppe_items)
+        self.assertEqual(matched[1], "BYTE_ID:99", "Higher IoU candidate must win ByteTrack ID")
+        self.assertIsNone(matched[0], "Lower IoU candidate must fall back to None/subsequent phases")
+
+    def test_detect_assigns_bytetrack_id_without_crash(self):
+        """detect() must safely assign ByteTrack ID as pid for new tracks without indexing TypeError."""
+        from unittest.mock import MagicMock
+        self.detector._prev_persons = [{"bbox": [10, 10, 50, 100], "kpts": np.zeros((17, 3)), "pid": 1, "track_id": 1, "lost_count": 0}]
+        self.detector._is_valid_human_skeleton = MagicMock(return_value=(True, "OK"))
+
+        mock_box = MagicMock()
+        mock_box.xyxy = [[100, 100, 200, 300]]
+        mock_box.conf = [0.9]
+
+        mock_res = MagicMock()
+        mock_res.boxes = [mock_box]
+        mock_kpts = MagicMock()
+        mock_kpts.data.cpu().numpy.return_value = np.zeros((1, 17, 3))
+        mock_res.keypoints = mock_kpts
+
+        self.detector.model.predict = MagicMock(return_value=[mock_res])
+
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        self.detector.detect(frame, ppe_track_items=[{"id": 88, "bbox": [100, 100, 200, 300]}])
+
+        self.assertEqual(len(self.detector.last_detected_persons), 1)
+        self.assertEqual(self.detector.last_detected_persons[0]["pid"], 88)
+
+
 if __name__ == "__main__":
     unittest.main()
+

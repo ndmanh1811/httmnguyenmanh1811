@@ -199,80 +199,89 @@ class PoseFallDetector:
         Returns: list of (int index | str marker "BYTE_ID:<id>" | None)
         """
         matched: list[int | None | str] = [None] * len(new_bboxes)
-        if not self._prev_persons:
-            # Không có track trước -> vẫn chạy Phase 0 để gán ByteTrack ID cho người mới
-            pass
-        else:
-            used_prev: set[int] = set()
+        used_prev: set[int] = set()
 
-            # Giai đoạn 0: Spatial IoU matching với ByteTrack items (order-independent!)
-            if ppe_track_items is not None:
-                for new_i, bbox in enumerate(new_bboxes):
-                    best_iou = 0.35
-                    best_track_id = None
-                    for item in ppe_track_items:
-                        iou = _calc_box_iou(bbox, item["bbox"])
-                        if iou > best_iou:
-                            best_iou = iou
-                            best_track_id = item["id"]
-                    if best_track_id is not None:
-                        # Tìm trong prev_persons xem track_id này đã có track chưa
-                        found = False
-                        for j, prev in enumerate(self._prev_persons):
-                            if j in used_prev:
-                                continue
-                            if prev.get("track_id") == best_track_id:
-                                matched[new_i] = j
-                                used_prev.add(j)
-                                found = True
-                                break
-                        if not found:
-                            # Match được với PPE nhưng chưa có track -> marker để gán pid = ByteTrack ID
-                            matched[new_i] = f"BYTE_ID:{best_track_id}"
-
-            # Giai đoạn 1: IoU Matching với previous tracks
+        # Giai đoạn 0: Spatial IoU matching với ByteTrack items (order-independent, length-independent!)
+        if ppe_track_items:
+            # Thu thập tất cả các cặp candidate có IoU >= 0.35
+            candidates = []
             for new_i, bbox in enumerate(new_bboxes):
-                if matched[new_i] is not None:
+                for item in ppe_track_items:
+                    iou = _calc_box_iou(bbox, item["bbox"])
+                    if iou >= 0.35:
+                        candidates.append((iou, new_i, item["id"]))
+
+            # Sắp xếp theo IoU giảm dần (ưu tiên IoU cao nhất, giải quyết triệt để vấn đề trùng ID)
+            candidates.sort(key=lambda x: x[0], reverse=True)
+
+            used_new_i: set[int] = set()
+            used_byte_ids: set[int] = set()
+
+            for iou, new_i, track_id in candidates:
+                if new_i in used_new_i or track_id in used_byte_ids:
                     continue
-                best_iou = 0.20
-                best_j = None
+
+                # Tìm trong prev_persons xem track_id này đã có track chưa
+                found = False
                 for j, prev in enumerate(self._prev_persons):
                     if j in used_prev:
                         continue
-                    iou = _calc_box_iou(bbox, prev["bbox"])
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_j = j
-                if best_j is not None:
-                    matched[new_i] = best_j
-                    used_prev.add(best_j)
+                    if prev.get("track_id") == track_id:
+                        matched[new_i] = j
+                        used_prev.add(j)
+                        found = True
+                        break
 
-            # Giai đoạn 2: Khoảng cách tâm thích ứng
-            for new_i, bbox in enumerate(new_bboxes):
-                if matched[new_i] is not None:
+                if not found:
+                    # Match được với PPE nhưng chưa có track (người mới hoặc Frame 1) -> marker gán pid
+                    matched[new_i] = f"BYTE_ID:{track_id}"
+
+                used_new_i.add(new_i)
+                used_byte_ids.add(track_id)
+
+        # Giai đoạn 1: IoU Matching với previous tracks
+        for new_i, bbox in enumerate(new_bboxes):
+            if matched[new_i] is not None:
+                continue
+            best_iou = 0.20
+            best_j = None
+            for j, prev in enumerate(self._prev_persons):
+                if j in used_prev:
                     continue
-                ncx = (bbox[0] + bbox[2]) / 2.0
-                ncy = (bbox[1] + bbox[3]) / 2.0
-                bw = max(bbox[2] - bbox[0], 1)
-                bh = max(bbox[3] - bbox[1], 1)
-                diag = math.hypot(bw, bh)
-                adaptive_max_dist = max(self._max_match_dist, 1.8 * diag)
+                iou = _calc_box_iou(bbox, prev["bbox"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_j = j
+            if best_j is not None:
+                matched[new_i] = best_j
+                used_prev.add(best_j)
 
-                best_dist = adaptive_max_dist
-                best_j = None
-                for j, prev in enumerate(self._prev_persons):
-                    if j in used_prev:
-                        continue
-                    pb = prev["bbox"]
-                    pcx = (pb[0] + pb[2]) / 2.0
-                    pcy = (pb[1] + pb[3]) / 2.0
-                    d = math.hypot(ncx - pcx, ncy - pcy)
-                    if d < best_dist:
-                        best_dist = d
-                        best_j = j
-                if best_j is not None:
-                    matched[new_i] = best_j
-                    used_prev.add(best_j)
+        # Giai đoạn 2: Khoảng cách tâm thích ứng
+        for new_i, bbox in enumerate(new_bboxes):
+            if matched[new_i] is not None:
+                continue
+            ncx = (bbox[0] + bbox[2]) / 2.0
+            ncy = (bbox[1] + bbox[3]) / 2.0
+            bw = max(bbox[2] - bbox[0], 1)
+            bh = max(bbox[3] - bbox[1], 1)
+            diag = math.hypot(bw, bh)
+            adaptive_max_dist = max(self._max_match_dist, 1.8 * diag)
+
+            best_dist = adaptive_max_dist
+            best_j = None
+            for j, prev in enumerate(self._prev_persons):
+                if j in used_prev:
+                    continue
+                pb = prev["bbox"]
+                pcx = (pb[0] + pb[2]) / 2.0
+                pcy = (pb[1] + pb[3]) / 2.0
+                d = math.hypot(ncx - pcx, ncy - pcy)
+                if d < best_dist:
+                    best_dist = d
+                    best_j = j
+            if best_j is not None:
+                matched[new_i] = best_j
+                used_prev.add(best_j)
 
         return matched
 
@@ -891,16 +900,20 @@ class PoseFallDetector:
             prev_idx = matched_prev[i]
             
             # Handle Phase 0 marker: "BYTE_ID:<track_id>" -> assign ByteTrack ID as pid directly
+            real_prev_idx = None
             if isinstance(prev_idx, str) and prev_idx.startswith("BYTE_ID:"):
                 pid = int(prev_idx.split(":")[1])
-            elif prev_idx is not None and "pid" in self._prev_persons[prev_idx]:
+            elif isinstance(prev_idx, int) and prev_idx is not None and "pid" in self._prev_persons[prev_idx]:
                 pid = self._prev_persons[prev_idx]["pid"]
+                real_prev_idx = prev_idx
             else:
                 pid = self._next_person_id
                 self._next_person_id += 1
+
+            self._next_person_id = max(self._next_person_id, pid + 1)
             active_pids.add(pid)
 
-            prev_kpts = self._prev_persons[prev_idx]["kpts"] if prev_idx is not None else None
+            prev_kpts = self._prev_persons[real_prev_idx]["kpts"] if real_prev_idx is not None else None
             kpts = self._smooth_keypoints(pid, raw_kpts, prev_kpts)
 
             # Path A: BB Dynamics
