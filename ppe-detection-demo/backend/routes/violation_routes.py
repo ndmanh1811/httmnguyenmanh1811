@@ -3,13 +3,22 @@ violation_routes.py - Violation history endpoints
 """
 
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 
 from flask import Blueprint, jsonify, request
 
 from models import db, Violation
 
 violation_bp = Blueprint("violation", __name__)
+
+
+def _parse_date(date_str: str) -> datetime | None:
+    """Parse date string in format YYYY-MM-DD to UTC datetime at start of day."""
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        return datetime.combine(d, datetime.min.time())
+    except Exception:
+        return None
 
 
 @violation_bp.route("/api/violations", methods=["GET"])
@@ -19,6 +28,8 @@ def get_violations():
     vtype = request.args.get("type", "").strip()
     time_range = request.args.get("time_range", "all").strip()
     camera_id = request.args.get("camera_id", None, type=int)
+    from_date = request.args.get("from_date", "").strip()
+    to_date = request.args.get("to_date", "").strip()
 
     query = Violation.query.order_by(Violation.timestamp.desc())
 
@@ -29,7 +40,7 @@ def get_violations():
         else:
             query = query.filter(Violation.violation_type == vtype)
 
-    # 2. Loc theo moc thoi gian
+    # 2. Loc theo moc thoi gian (quick filters)
     now_utc = datetime.utcnow()
     if time_range == "today":
         now_local = datetime.now()
@@ -43,7 +54,19 @@ def get_violations():
     elif time_range == "30d":
         query = query.filter(Violation.timestamp >= now_utc - timedelta(days=30))
 
-    # 3. Loc theo camera
+    # 3. Loc theo khoang ngay tu-chon (custom date range) - override time_range neu co
+    if from_date:
+        start_dt = _parse_date(from_date)
+        if start_dt:
+            query = query.filter(Violation.timestamp >= start_dt)
+    if to_date:
+        end_dt = _parse_date(to_date)
+        if end_dt:
+            # include entire end day: < next day 00:00
+            end_dt_next = end_dt + timedelta(days=1)
+            query = query.filter(Violation.timestamp < end_dt_next)
+
+    # 4. Loc theo camera
     if camera_id is not None:
         query = query.filter(Violation.camera_id == camera_id)
 

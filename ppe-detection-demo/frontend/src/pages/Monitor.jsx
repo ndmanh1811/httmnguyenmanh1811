@@ -7,6 +7,9 @@ import {
   CameraOff,
   X,
   ShieldCheck,
+  Bell,
+  BellOff,
+  Trash2,
 } from 'lucide-react'
 import api from '../api'
 import soundEngine from '../utils/soundEngine'
@@ -18,6 +21,7 @@ const VIOLATION_STYLES = {
   no_vest: { label: 'Thiếu áo bảo hộ', border: 'border-l-orange-400', dot: 'bg-orange-400' },
   no_mask: { label: 'Thiếu khẩu trang', border: 'border-l-purple-400', dot: 'bg-purple-400' },
   fall_detected: { label: 'Phát hiện ngã', border: 'border-l-rose-500', dot: 'bg-rose-500 animate-pulse' },
+  fall_immobile: { label: 'Ngã bất động (>5s)', border: 'border-l-red-600', dot: 'bg-red-600 animate-ping' },
   fire_detected: { label: 'Phát hiện cháy', border: 'border-l-red-500', dot: 'bg-red-500 animate-ping' },
   smoke_detected: { label: 'Phát hiện khói', border: 'border-l-amber-500', dot: 'bg-amber-500 animate-pulse' },
 }
@@ -25,21 +29,100 @@ const VIOLATION_STYLES = {
 const HIDE_EXCLUSION_ZONES = true
 
 export default function Monitor() {
-  const [alerts, setAlerts] = useState([])
-  const [soundEnabled, setSoundEnabled] = useState(true)
-  const [cameraOn, setCameraOn] = useState(false)
-  const [frameSkip, setFrameSkip] = useState(1)
-  const [enablePpe, setEnablePpe] = useState(true)
-  const [enableFall, setEnableFall] = useState(true)
-  const [enableFire, setEnableFire] = useState(true)
-  const [liveStats, setLiveStats] = useState({ total: 0, helmet: 0, vest: 0, mask: 0, fall: 0, fire: 0, smoke: 0 })
+  // Master surveillance & alarm toggle: only starts alarm listening when user activates
+  const [surveillanceActive, setSurveillanceActive] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_monitor_surveillance')
+      return v !== null ? JSON.parse(v) : false // default off so user toggles to start
+    } catch {
+      return false
+    }
+  })
+
+  const [alerts, setAlerts] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_monitor_alerts')
+      return v ? JSON.parse(v) : []
+    } catch {
+      return []
+    }
+  })
+
+  const [soundEnabled, setSoundEnabled] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_monitor_sound')
+      return v !== null ? JSON.parse(v) : true
+    } catch {
+      return true
+    }
+  })
+
+  const [cameraOn, setCameraOn] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_monitor_camera_on')
+      return v !== null ? JSON.parse(v) : false
+    } catch {
+      return false
+    }
+  })
+
+  const [frameSkip, setFrameSkip] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_monitor_frame_skip')
+      return v !== null ? Number(v) : 1
+    } catch {
+      return 1
+    }
+  })
+
+  const [enablePpe, setEnablePpe] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_monitor_enable_ppe')
+      return v !== null ? JSON.parse(v) : true
+    } catch {
+      return true
+    }
+  })
+
+  const [enableFall, setEnableFall] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_monitor_enable_fall')
+      return v !== null ? JSON.parse(v) : true
+    } catch {
+      return true
+    }
+  })
+
+  const [enableFire, setEnableFire] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_monitor_enable_fire')
+      return v !== null ? JSON.parse(v) : true
+    } catch {
+      return true
+    }
+  })
+
+  const [liveStats, setLiveStats] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_monitor_stats')
+      return v ? JSON.parse(v) : { total: 0, helmet: 0, vest: 0, mask: 0, fall: 0, fire: 0, smoke: 0 }
+    } catch {
+      return { total: 0, helmet: 0, vest: 0, mask: 0, fall: 0, fire: 0, smoke: 0 }
+    }
+  })
 
   const [cameras, setCameras] = useState([])
-  const [selectedCameraId, setSelectedCameraId] = useState(0)
+  const [selectedCameraId, setSelectedCameraId] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_monitor_camera_id')
+      return v !== null ? Number(v) : 0
+    } catch {
+      return 0
+    }
+  })
 
   // Exclusion Zone (ROI) State
   const [exclusionZones, setExclusionZones] = useState([])
-  const [showZonePanel, setShowZonePanel] = useState(false)
   const [isDrawing, setIsDrawing] = useState(false)
   const [currentPoints, setCurrentPoints] = useState([])
   const [cursorPos, setCursorPos] = useState(null)
@@ -52,6 +135,22 @@ export default function Monitor() {
   const canvasRef = useRef(null)
   const videoContainerRef = useRef(null)
 
+  // Persist state changes
+  useEffect(() => {
+    try {
+      localStorage.setItem('ppe_monitor_surveillance', JSON.stringify(surveillanceActive))
+      localStorage.setItem('ppe_monitor_sound', JSON.stringify(soundEnabled))
+      localStorage.setItem('ppe_monitor_camera_on', JSON.stringify(cameraOn))
+      localStorage.setItem('ppe_monitor_frame_skip', String(frameSkip))
+      localStorage.setItem('ppe_monitor_camera_id', String(selectedCameraId))
+      localStorage.setItem('ppe_monitor_enable_ppe', JSON.stringify(enablePpe))
+      localStorage.setItem('ppe_monitor_enable_fall', JSON.stringify(enableFall))
+      localStorage.setItem('ppe_monitor_enable_fire', JSON.stringify(enableFire))
+      localStorage.setItem('ppe_monitor_alerts', JSON.stringify(alerts.slice(0, 30)))
+      localStorage.setItem('ppe_monitor_stats', JSON.stringify(liveStats))
+    } catch (e) {}
+  }, [surveillanceActive, soundEnabled, cameraOn, frameSkip, selectedCameraId, enablePpe, enableFall, enableFire, alerts, liveStats])
+
   const loadExclusionZones = useCallback(async (camId = selectedCameraId) => {
     try {
       const res = await api.get(`/cameras/${camId}/exclusion_zones`)
@@ -63,9 +162,15 @@ export default function Monitor() {
 
   useEffect(() => {
     api.get('/settings').then(r => {
-      if (r.data.enable_ppe) setEnablePpe(String(r.data.enable_ppe.value).toLowerCase() === 'true')
-      if (r.data.enable_fall) setEnableFall(String(r.data.enable_fall.value).toLowerCase() === 'true')
-      if (r.data.enable_fire) setEnableFire(String(r.data.enable_fire.value).toLowerCase() === 'true')
+      if (r.data.enable_ppe && localStorage.getItem('ppe_monitor_enable_ppe') === null) {
+        setEnablePpe(String(r.data.enable_ppe.value).toLowerCase() === 'true')
+      }
+      if (r.data.enable_fall && localStorage.getItem('ppe_monitor_enable_fall') === null) {
+        setEnableFall(String(r.data.enable_fall.value).toLowerCase() === 'true')
+      }
+      if (r.data.enable_fire && localStorage.getItem('ppe_monitor_enable_fire') === null) {
+        setEnableFire(String(r.data.enable_fire.value).toLowerCase() === 'true')
+      }
     }).catch(() => {})
 
     api.get('/cameras').then(r => setCameras(r.data || [])).catch(() => {})
@@ -77,14 +182,17 @@ export default function Monitor() {
     const socket = io({ transports: ['polling'] })
 
     const handleAlert = (data) => {
-      setAlerts((prev) => [data, ...prev].slice(0, 25))
+      // Chỉ kích hoạt xử lý và chuông báo khi người dùng đã BẬT chế độ giám sát
+      if (!surveillanceActive) return
+
+      setAlerts((prev) => [data, ...prev].slice(0, 30))
       setLiveStats((prev) => ({
         ...prev,
         total: prev.total + 1,
         helmet: data.type === 'no_helmet' ? prev.helmet + 1 : prev.helmet,
         vest: data.type === 'no_vest' ? prev.vest + 1 : prev.vest,
         mask: data.type === 'no_mask' ? prev.mask + 1 : prev.mask,
-        fall: data.type === 'fall_detected' ? prev.fall + 1 : prev.fall,
+        fall: data.type === 'fall_detected' || data.type === 'fall_immobile' ? prev.fall + 1 : prev.fall,
         fire: data.type === 'fire_detected' ? prev.fire + 1 : prev.fire,
         smoke: data.type === 'smoke_detected' ? prev.smoke + 1 : prev.smoke,
       }))
@@ -98,7 +206,7 @@ export default function Monitor() {
     socket.on('fire_alert', handleAlert)
 
     return () => socket.disconnect()
-  }, [soundEnabled])
+  }, [soundEnabled, surveillanceActive])
 
   const stopCamera = useCallback(async () => {
     if (camKeyRef.current) {
@@ -284,10 +392,17 @@ export default function Monitor() {
 
   const ppeCount = liveStats.helmet + liveStats.vest + liveStats.mask
 
+  const clearAlerts = () => {
+    setAlerts([])
+    setLiveStats({ total: 0, helmet: 0, vest: 0, mask: 0, fall: 0, fire: 0, smoke: 0 })
+    localStorage.removeItem('ppe_monitor_alerts')
+    localStorage.removeItem('ppe_monitor_stats')
+  }
+
   return (
-    <div className="space-y-4">
-      {/* Top Header Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="h-[calc(100vh-4.25rem)] overflow-hidden flex flex-col gap-2.5 pb-1">
+      {/* Top Header Controls (Fixed Height) */}
+      <div className="flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
         <div>
           <h1 className="text-xl font-semibold tracking-tight text-foreground">Giám sát trực tiếp</h1>
           <p className="text-xs text-muted-foreground mt-0.5">
@@ -296,6 +411,31 @@ export default function Monitor() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Main Surveillance Alarm Toggle (Bật / Tắt cảnh báo giám sát) */}
+          <button
+            onClick={() => setSurveillanceActive(!surveillanceActive)}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border shadow-sm cursor-pointer select-none ${
+              surveillanceActive
+                ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/25'
+                : 'bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+            }`}
+            title={surveillanceActive ? 'Nhấn để tạm dừng cảnh báo' : 'Nhấn để bắt đầu giám sát và kích hoạt chuông cảnh báo'}
+          >
+            {surveillanceActive ? (
+              <>
+                <Bell className="w-3.5 h-3.5 text-emerald-400 animate-bounce" />
+                <span>Đang giám sát & Cảnh báo</span>
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping ml-0.5" />
+              </>
+            ) : (
+              <>
+                <BellOff className="w-3.5 h-3.5 text-zinc-400" />
+                <span>Bật giám sát & Báo động</span>
+                <span className="w-2 h-2 rounded-full bg-zinc-600 ml-0.5" />
+              </>
+            )}
+          </button>
+
           {/* AI Feature Toggle Pills */}
           <div className="flex items-center bg-card border border-border rounded-lg p-0.5 gap-0.5">
             <button
@@ -341,6 +481,7 @@ export default function Monitor() {
             size="sm"
             onClick={() => setSoundEnabled(!soundEnabled)}
             className="h-8 text-xs cursor-pointer"
+            title={soundEnabled ? 'Tắt âm báo' : 'Bật âm báo'}
           >
             {soundEnabled ? (
               <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
@@ -351,13 +492,14 @@ export default function Monitor() {
         </div>
       </div>
 
-      {/* Main Grid: Stream (Left) + Realtime Alerts (Right) */}
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
-        {/* Left Column: Stream Container & Controls */}
-        <div className="lg:col-span-3 space-y-3">
+      {/* Main Content Layout: Fits in 100vh Without Window Scrolling */}
+      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-4 gap-3">
+        {/* Left Column (3 cols): Stream + Bottom Controls & Mini Stats */}
+        <div className="lg:col-span-3 flex flex-col h-full min-h-0 gap-2">
+          {/* Stream Container - Takes Remaining Height */}
           <div
             ref={videoContainerRef}
-            className="relative bg-card rounded-xl border border-border overflow-hidden select-none aspect-video flex items-center justify-center"
+            className="flex-1 min-h-0 relative bg-black/90 rounded-xl border border-border overflow-hidden select-none flex items-center justify-center shadow-inner"
           >
             {cameraOn ? (
               <img
@@ -370,11 +512,11 @@ export default function Monitor() {
                 }}
               />
             ) : (
-              <div className="flex flex-col items-center justify-center text-muted-foreground">
-                <CameraOff className="w-10 h-10 mb-2 opacity-30" />
-                <p className="text-xs font-medium">Camera đang tắt</p>
-                <p className="text-[11px] text-muted-foreground/60 mt-0.5">
-                  Nhấn nút &quot;Bật Camera&quot; bên dưới để bắt đầu nhận diện
+              <div className="flex flex-col items-center justify-center text-muted-foreground p-6 text-center">
+                <CameraOff className="w-12 h-12 mb-3 opacity-30" />
+                <p className="text-sm font-medium text-foreground">Camera đang tắt</p>
+                <p className="text-xs text-muted-foreground/70 mt-1 max-w-sm">
+                  Nhấn nút &quot;Bật Camera&quot; bên dưới để mở luồng hình ảnh trực tiếp
                 </p>
               </div>
             )}
@@ -389,10 +531,22 @@ export default function Monitor() {
                 isDrawing ? 'cursor-crosshair pointer-events-auto' : 'pointer-events-none'
               }`}
             />
+
+            {/* Surveillance Status Watermark Overlay */}
+            <div className="absolute top-2.5 left-2.5 z-10 pointer-events-none">
+              <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-mono font-semibold backdrop-blur-md border ${
+                surveillanceActive
+                  ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/40'
+                  : 'bg-zinc-900/80 text-zinc-400 border-zinc-700/60'
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${surveillanceActive ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
+                {surveillanceActive ? 'LIVE ACTIVE' : 'STANDBY'}
+              </span>
+            </div>
           </div>
 
-          {/* Camera Controls Bar */}
-          <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-card rounded-xl border border-border">
+          {/* Compact Bottom Controls & Live Stats Bar */}
+          <div className="flex-shrink-0 flex flex-wrap items-center justify-between gap-2 p-2.5 bg-card rounded-xl border border-border">
             <div className="flex items-center gap-2">
               <Button
                 size="sm"
@@ -436,71 +590,86 @@ export default function Monitor() {
                   ))}
                 </select>
               )}
-            </div>
 
-            {/* Frame Skip Selector */}
-            <div className="flex items-center gap-1 text-xs text-muted-foreground">
-              <span className="text-[11px] mr-1">Tốc độ:</span>
-              {[1, 2, 5].map((skip) => (
-                <button
-                  key={skip}
-                  onClick={() => changeFrameSkip(skip)}
-                  className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer ${
-                    frameSkip === skip
-                      ? 'bg-accent text-accent-foreground font-semibold'
-                      : 'text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  {skip === 1 ? 'Chuẩn' : `${skip}x`}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Live Stats Summary Bar */}
-          <div className="grid grid-cols-4 gap-2">
-            <div className="bg-card border border-border rounded-lg p-3 text-center">
-              <div className="text-xl font-bold text-foreground tabular-nums">{liveStats.total}</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">Tổng sự cố</div>
-            </div>
-            <div className="bg-card border border-border rounded-lg p-3 text-center">
-              <div className="text-xl font-bold text-amber-400 tabular-nums">{ppeCount}</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">Vi phạm PPE</div>
-            </div>
-            <div className="bg-card border border-border rounded-lg p-3 text-center">
-              <div className="text-xl font-bold text-rose-400 tabular-nums">{liveStats.fall}</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">Phát hiện ngã</div>
-            </div>
-            <div className="bg-card border border-border rounded-lg p-3 text-center">
-              <div className="text-xl font-bold text-red-400 tabular-nums">
-                {liveStats.fire + liveStats.smoke}
+              {/* Speed / Frame Skip Selector */}
+              <div className="flex items-center gap-1 text-xs text-muted-foreground ml-1">
+                <span className="text-[11px] mr-0.5">Tốc độ:</span>
+                {[1, 2, 5].map((skip) => (
+                  <button
+                    key={skip}
+                    onClick={() => changeFrameSkip(skip)}
+                    className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer ${
+                      frameSkip === skip
+                        ? 'bg-accent text-accent-foreground font-semibold'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {skip === 1 ? 'Chuẩn' : `${skip}x`}
+                  </button>
+                ))}
               </div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">Cháy & Khói</div>
+            </div>
+
+            {/* Compact Inline Live Stats Pills */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] px-2.5 py-1 rounded-md bg-muted/60 border border-border text-foreground font-mono">
+                Tổng: <strong>{liveStats.total}</strong>
+              </span>
+              <span className="text-[11px] px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-400 font-mono">
+                PPE: <strong>{ppeCount}</strong>
+              </span>
+              <span className="text-[11px] px-2.5 py-1 rounded-md bg-rose-500/10 border border-rose-500/30 text-rose-400 font-mono">
+                Ngã: <strong>{liveStats.fall}</strong>
+              </span>
+              <span className="text-[11px] px-2.5 py-1 rounded-md bg-red-500/10 border border-red-500/30 text-red-400 font-mono">
+                Cháy/Khói: <strong>{liveStats.fire + liveStats.smoke}</strong>
+              </span>
             </div>
           </div>
         </div>
 
-        {/* Right Column: Real-time Alert Feed */}
-        <div className="bg-card rounded-xl border border-border p-4 flex flex-col h-[560px]">
-          <div className="flex items-center justify-between pb-3 border-b border-border/50 flex-shrink-0">
-            <span className="text-xs font-semibold text-foreground uppercase tracking-wider">
-              Cảnh báo trực tiếp
-            </span>
+        {/* Right Column (1 col): Real-time Alert Feed (Fit 100vh with Internal Scroll) */}
+        <div className="lg:col-span-1 h-full min-h-0 bg-card rounded-xl border border-border p-3 flex flex-col">
+          <div className="flex items-center justify-between pb-2.5 border-b border-border/50 flex-shrink-0">
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-semibold text-foreground uppercase tracking-wider">
+                Cảnh báo trực tiếp
+              </span>
+              {alerts.length > 0 && (
+                <Badge variant="outline" className="text-[10px] h-4 font-mono px-1.5">
+                  {alerts.length}
+                </Badge>
+              )}
+            </div>
+
             {alerts.length > 0 && (
-              <Badge variant="outline" className="text-[10px] h-5 font-mono">
-                {alerts.length}
-              </Badge>
+              <button
+                onClick={clearAlerts}
+                className="text-muted-foreground hover:text-destructive text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                title="Xóa danh sách cảnh báo"
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>Xóa</span>
+              </button>
             )}
           </div>
 
-          {alerts.length === 0 ? (
-            <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground text-xs py-8">
-              <ShieldCheck className="w-8 h-8 mb-2 opacity-30 text-emerald-400" />
-              <p>Chưa phát hiện vi phạm</p>
+          {!surveillanceActive ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground text-xs py-8 text-center px-2">
+              <BellOff className="w-8 h-8 mb-2 opacity-30 text-zinc-500" />
+              <p className="font-medium text-foreground">Giám sát đang tạm dừng</p>
+              <p className="text-[10px] text-muted-foreground/70 mt-1">
+                Gạt nút &quot;Bật giám sát & Báo động&quot; phía trên khi muốn bắt đầu ghi nhận sự cố
+              </p>
+            </div>
+          ) : alerts.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground text-xs py-8 text-center">
+              <ShieldCheck className="w-9 h-9 mb-2 opacity-40 text-emerald-400" />
+              <p className="font-medium text-foreground">Chưa phát hiện vi phạm</p>
               <p className="text-[10px] text-muted-foreground/60 mt-0.5">Khu vực làm việc an toàn</p>
             </div>
           ) : (
-            <div className="space-y-2 overflow-y-auto flex-1 pr-1 pt-3">
+            <div className="space-y-1.5 overflow-y-auto flex-1 min-h-0 pr-1 pt-2">
               {alerts.map((a, i) => {
                 const style = VIOLATION_STYLES[a.type] || { label: a.type, border: 'border-l-zinc-500', dot: 'bg-zinc-500' }
                 const time = new Date(a.timestamp)
@@ -508,7 +677,7 @@ export default function Monitor() {
                 return (
                   <div
                     key={i}
-                    className={`pl-3 py-2 pr-2 rounded-r-md border-l-2 bg-muted/30 transition-all ${
+                    className={`pl-2.5 py-1.5 pr-2 rounded-r-md border-l-2 bg-muted/30 transition-all ${
                       isBreakout
                         ? 'border-l-red-500 bg-red-950/20'
                         : style.border
@@ -527,7 +696,7 @@ export default function Monitor() {
                         Cháy lan ngoài vùng loại trừ
                       </div>
                     )}
-                    <div className="text-[10px] text-muted-foreground mt-1">
+                    <div className="text-[10px] text-muted-foreground mt-0.5">
                       Độ tin cậy: <strong className="text-foreground">{a.confidence}%</strong>
                     </div>
                   </div>
@@ -609,4 +778,3 @@ export default function Monitor() {
     </div>
   )
 }
-

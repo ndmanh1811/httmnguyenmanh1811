@@ -7,6 +7,7 @@ import {
   XCircle,
   Download,
   X,
+  RefreshCw,
 } from 'lucide-react'
 import { io } from 'socket.io-client'
 import api from '../api'
@@ -14,24 +15,126 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 
 export default function UploadPage() {
+  // Saved persistent options
+  const [frameSkip, setFrameSkip] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_upload_frame_skip')
+      return v !== null ? Number(v) : 2
+    } catch {
+      return 2
+    }
+  })
+  const [imgsz, setImgsz] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_upload_imgsz')
+      return v !== null ? Number(v) : 960
+    } catch {
+      return 960
+    }
+  })
+  const [enablePpe, setEnablePpe] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_upload_enable_ppe')
+      return v !== null ? JSON.parse(v) : true
+    } catch {
+      return true
+    }
+  })
+  const [enableFall, setEnableFall] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_upload_enable_fall')
+      return v !== null ? JSON.parse(v) : true
+    } catch {
+      return true
+    }
+  })
+  const [enableFire, setEnableFire] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_upload_enable_fire')
+      return v !== null ? JSON.parse(v) : true
+    } catch {
+      return true
+    }
+  })
+  const [useClahe, setUseClahe] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_upload_use_clahe')
+      return v !== null ? JSON.parse(v) : true
+    } catch {
+      return true
+    }
+  })
+  const [useSahi, setUseSahi] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_upload_use_sahi')
+      return v !== null ? JSON.parse(v) : false
+    } catch {
+      return false
+    }
+  })
+
+  // Persistent analysis result and analyzed video name
+  const [result, setResult] = useState(() => {
+    try {
+      const v = localStorage.getItem('ppe_upload_result')
+      return v ? JSON.parse(v) : null
+    } catch {
+      return null
+    }
+  })
+  const [savedFileName, setSavedFileName] = useState(() => {
+    try {
+      return localStorage.getItem('ppe_upload_filename') || ''
+    } catch {
+      return ''
+    }
+  })
+  const [savedFileSize, setSavedFileSize] = useState(() => {
+    try {
+      return localStorage.getItem('ppe_upload_filesize') || ''
+    } catch {
+      return ''
+    }
+  })
+
   const [file, setFile] = useState(null)
-  const [frameSkip, setFrameSkip] = useState(2)
-  const [imgsz, setImgsz] = useState(960)
-  const [enablePpe, setEnablePpe] = useState(true)
-  const [enableFall, setEnableFall] = useState(true)
-  const [enableFire, setEnableFire] = useState(true)
-  const [useClahe, setUseClahe] = useState(true)
-  const [useSahi, setUseSahi] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState(null)
   const [progress, setProgress] = useState(null)
   const [cancelled, setCancelled] = useState(false)
-
   const [exclusionZones, setExclusionZones] = useState([])
 
   const inputRef = useRef(null)
   const uploadIdRef = useRef(null)
   const socketRef = useRef(null)
+
+  // Sync settings to localStorage
+  useEffect(() => {
+    try { localStorage.setItem('ppe_upload_frame_skip', String(frameSkip)) } catch {}
+  }, [frameSkip])
+
+  useEffect(() => {
+    try { localStorage.setItem('ppe_upload_imgsz', String(imgsz)) } catch {}
+  }, [imgsz])
+
+  useEffect(() => {
+    try { localStorage.setItem('ppe_upload_enable_ppe', JSON.stringify(enablePpe)) } catch {}
+  }, [enablePpe])
+
+  useEffect(() => {
+    try { localStorage.setItem('ppe_upload_enable_fall', JSON.stringify(enableFall)) } catch {}
+  }, [enableFall])
+
+  useEffect(() => {
+    try { localStorage.setItem('ppe_upload_enable_fire', JSON.stringify(enableFire)) } catch {}
+  }, [enableFire])
+
+  useEffect(() => {
+    try { localStorage.setItem('ppe_upload_use_clahe', JSON.stringify(useClahe)) } catch {}
+  }, [useClahe])
+
+  useEffect(() => {
+    try { localStorage.setItem('ppe_upload_use_sahi', JSON.stringify(useSahi)) } catch {}
+  }, [useSahi])
 
   useEffect(() => {
     const socket = io({ transports: ['polling'] })
@@ -60,6 +163,11 @@ export default function UploadPage() {
           return
         }
         setResult(data)
+        try {
+          localStorage.setItem('ppe_upload_result', JSON.stringify(data))
+        } catch (e) {
+          console.warn('Failed to save upload result in localStorage:', e)
+        }
         setLoading(false)
         setProgress(null)
         uploadIdRef.current = null
@@ -68,6 +176,20 @@ export default function UploadPage() {
 
     return () => socket.disconnect()
   }, [])
+
+  const handleReset = () => {
+    setFile(null)
+    setResult(null)
+    setProgress(null)
+    setCancelled(false)
+    setSavedFileName('')
+    setSavedFileSize('')
+    try {
+      localStorage.removeItem('ppe_upload_result')
+      localStorage.removeItem('ppe_upload_filename')
+      localStorage.removeItem('ppe_upload_filesize')
+    } catch {}
+  }
 
   const handleCancel = async () => {
     const currentId = uploadIdRef.current
@@ -98,6 +220,17 @@ export default function UploadPage() {
     setResult(null)
     setCancelled(false)
     uploadIdRef.current = null
+
+    // Cache file info
+    const fName = file.name
+    const fSize = (file.size / (1024 * 1024)).toFixed(1)
+    setSavedFileName(fName)
+    setSavedFileSize(fSize)
+    try {
+      localStorage.setItem('ppe_upload_filename', fName)
+      localStorage.setItem('ppe_upload_filesize', fSize)
+      localStorage.removeItem('ppe_upload_result')
+    } catch {}
 
     const formData = new FormData()
     formData.append('video', file)
@@ -133,11 +266,24 @@ export default function UploadPage() {
   return (
     <div className="space-y-6 w-full">
       {/* Header */}
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight text-foreground">Phân tích video ngoại tuyến</h1>
-        <p className="text-xs text-muted-foreground mt-0.5">
-          Tải lên video giám sát định dạng MP4/AVI để AI quét toàn diện sự cố và xuất video bằng chứng
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight text-foreground">Phân tích video ngoại tuyến</h1>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Tải lên video giám sát định dạng MP4/AVI để AI quét toàn diện sự cố và xuất video bằng chứng
+          </p>
+        </div>
+        {result && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleReset}
+            className="h-8 text-xs cursor-pointer border-border hover:bg-accent gap-1.5"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Tải video khác / Làm mới
+          </Button>
+        )}
       </div>
 
       {/* Upload Zone */}
@@ -379,17 +525,34 @@ export default function UploadPage() {
         <div className="space-y-4 animate-in fade-in duration-300">
           <Card className="bg-card border-border shadow-none">
             <CardHeader className="p-4 border-b border-border/50">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-sm font-semibold text-foreground">
-                  Kết quả phân tích video
-                </CardTitle>
-                <a
-                  href={result.video_url || (result.output_video ? `/api/detect/output/${result.output_video}` : '#')}
-                  download="result_analyzed.mp4"
-                  className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 font-medium"
-                >
-                  <Download className="w-3.5 h-3.5" /> Tải video kết quả
-                </a>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <CardTitle className="text-sm font-semibold text-foreground">
+                    Kết quả phân tích video
+                  </CardTitle>
+                  {(savedFileName || file?.name) && (
+                    <span className="text-xs text-muted-foreground font-mono bg-muted/60 px-2 py-0.5 rounded border border-border/50">
+                      {savedFileName || file?.name} {savedFileSize ? `(${savedFileSize} MB)` : ''}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleReset}
+                    className="h-8 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Phân tích video khác
+                  </Button>
+                  <a
+                    href={result.video_url || (result.output_video ? `/api/detect/output/${result.output_video}` : '#')}
+                    download={savedFileName ? `analyzed_${savedFileName}` : 'result_analyzed.mp4'}
+                    className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1.5 font-medium bg-blue-500/10 hover:bg-blue-500/20 px-3 py-1.5 rounded-lg border border-blue-500/30 transition-colors"
+                  >
+                    <Download className="w-3.5 h-3.5" /> Tải video kết quả
+                  </a>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="p-4 space-y-4">

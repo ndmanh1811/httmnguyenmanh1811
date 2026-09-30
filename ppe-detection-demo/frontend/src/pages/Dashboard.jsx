@@ -67,8 +67,19 @@ export default function Dashboard() {
     )
   }
 
-  const ppeTotal = (stats.helmet_today || 0) + (stats.vest_today || 0) + (stats.mask_today || 0)
-  const emergencyTotal = (stats.fall_today || 0) + (stats.fire_today || 0) + (stats.smoke_today || 0)
+  const defaultStats = {
+    total_today: 0,
+    helmet_today: 0,
+    vest_today: 0,
+    mask_today: 0,
+    fall_today: 0,
+    fire_today: 0,
+    smoke_today: 0,
+    active_cameras: 0,
+  }
+  const safeStats = stats || defaultStats
+  const ppeTotal = (safeStats.helmet_today || 0) + (safeStats.vest_today || 0) + (safeStats.mask_today || 0)
+  const emergencyTotal = (safeStats.fall_today || 0) + (safeStats.fire_today || 0) + (safeStats.smoke_today || 0)
 
   return (
     <div className="space-y-6">
@@ -94,7 +105,7 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent className="p-4 pt-0">
             <div className="text-3xl font-bold tracking-tight text-foreground tabular-nums">
-              {stats.total_today || 0}
+              {safeStats.total_today || 0}
             </div>
             <p className="text-[11px] text-muted-foreground mt-1">
               Bao gồm vi phạm PPE và cảnh báo nguy cơ
@@ -117,11 +128,11 @@ export default function Dashboard() {
               {ppeTotal}
             </div>
             <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-1">
-              <span>Mũ: <strong className="text-foreground">{stats.helmet_today || 0}</strong></span>
+              <span>Mũ: <strong className="text-foreground">{safeStats.helmet_today || 0}</strong></span>
               <span>•</span>
-              <span>Áo: <strong className="text-foreground">{stats.vest_today || 0}</strong></span>
+              <span>Áo: <strong className="text-foreground">{safeStats.vest_today || 0}</strong></span>
               <span>•</span>
-              <span>Khẩu trang: <strong className="text-foreground">{stats.mask_today || 0}</strong></span>
+              <span>Khẩu trang: <strong className="text-foreground">{safeStats.mask_today || 0}</strong></span>
             </div>
           </CardContent>
         </Card>
@@ -141,11 +152,11 @@ export default function Dashboard() {
               {emergencyTotal}
             </div>
             <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-1">
-              <span>Cháy: <strong className="text-foreground">{stats.fire_today || 0}</strong></span>
+              <span>Cháy: <strong className="text-foreground">{safeStats.fire_today || 0}</strong></span>
               <span>•</span>
-              <span>Khói: <strong className="text-foreground">{stats.smoke_today || 0}</strong></span>
+              <span>Khói: <strong className="text-foreground">{safeStats.smoke_today || 0}</strong></span>
               <span>•</span>
-              <span>Ngã: <strong className="text-foreground">{stats.fall_today || 0}</strong></span>
+              <span>Ngã: <strong className="text-foreground">{safeStats.fall_today || 0}</strong></span>
             </div>
           </CardContent>
         </Card>
@@ -162,7 +173,7 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent className="p-4 pt-0">
             <div className="text-3xl font-bold tracking-tight text-foreground tabular-nums">
-              {stats.active_cameras || 0}
+              {safeStats.active_cameras || 0}
             </div>
             <p className="text-[11px] text-muted-foreground mt-1">
               Luồng giám sát trực tuyến ổn định
