@@ -27,12 +27,16 @@ class TestPPEDisablePersistence(unittest.TestCase):
         self.detector._last_rendered_persons = [{"bbox": [50, 50, 150, 200], "id": 1, "helmet": "ok", "vest": "ok", "mask": "ok"}]
         self.detector._last_rendered_ppe_items = [{"bbox": [60, 50, 90, 80], "type": "helmet", "status": "ok", "conf": 0.9, "label": "Mu"}]
         self.detector._last_ppe_inference_time = 1790793641.0
+        self.detector._off_slot_ppe_count = 3
+        self.detector._ppe_memory = {1: {"helmet": {"status": "ok"}}}
 
         self.detector.reset()
 
         self.assertEqual(len(self.detector._last_rendered_persons), 0)
         self.assertEqual(len(self.detector._last_rendered_ppe_items), 0)
         self.assertEqual(self.detector._last_ppe_inference_time, 0.0)
+        self.assertEqual(self.detector._off_slot_ppe_count, 0)
+        self.assertEqual(len(self.detector._ppe_memory), 0)
 
     def test_annotate_frame_enable_ppe_false_draws_no_boxes_and_ignores_stale_cache(self):
         # Populate stale cache from a past run
@@ -52,6 +56,8 @@ class TestPPEDisablePersistence(unittest.TestCase):
             "label": "Khong mu",
         }]
         self.detector._last_ppe_inference_time = 1790793641.0
+        self.detector._off_slot_ppe_count = 2
+        self.detector._ppe_memory = {1: {"helmet": {"status": "violation"}}}
 
         # Video timestamp at t = 0.04s (typical video upload timestamp)
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -71,9 +77,12 @@ class TestPPEDisablePersistence(unittest.TestCase):
         # 2. Frame pixels must NOT be modified by any PPE rectangles
         np.testing.assert_array_equal(annotated, frame_copy, "Frame should not have any PPE annotations drawn when enable_ppe=False")
 
-        # 3. Detector cache must be wiped
+        # 3. Detector cache, memory, and off-slot counter must be wiped
         self.assertEqual(len(self.detector._last_rendered_persons), 0)
         self.assertEqual(len(self.detector._last_rendered_ppe_items), 0)
+        self.assertEqual(len(self.detector._ppe_memory), 0)
+        self.assertEqual(self.detector._off_slot_ppe_count, 0)
+        self.assertEqual(self.detector._last_ppe_inference_time, 0.0)
 
     def test_visual_persistence_cache_dt_window(self):
         # Setup valid cache at t = 100.0s
@@ -252,6 +261,36 @@ class TestPPEDisablePersistence(unittest.TestCase):
 
         self.assertEqual(p2["helmet"], "violation", "Frame 2 confirmed violation must flip to 'violation'")
         self.assertEqual(rec["status"], "violation")
+
+    def test_person_only_tracking_and_track_buffer_persistence(self):
+        """Kiem tra ByteTracker chi theo doi Person va giu nguyen ID sau chuoi frame trong."""
+        import torch
+        from ultralytics.engine.results import Boxes
+
+        tracker = self.detector._person_tracker
+        self.assertIsNotNone(tracker, "PPEDetector must have dedicated _person_tracker")
+
+        # Gia lap frame co 1 person (cls 5) va 2 PPE items (Hardhat cls 0, Vest cls 7)
+        # Person data format: [x1, y1, x2, y2, conf, cls]
+        person_data = torch.tensor([[100, 100, 200, 300, 0.85, 5]], dtype=torch.float32)
+        b_person = Boxes(person_data, (480, 640)).cpu().numpy()
+        empty_b = Boxes(torch.zeros((0, 6), dtype=torch.float32), (480, 640)).cpu().numpy()
+        dummy_img = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        # Frame 1: Person xuat hien -> khoi tao track
+        res1 = tracker.update(b_person, dummy_img)
+        self.assertEqual(len(res1), 1)
+        initial_id = int(res1[0][4])
+
+        # Mo phong nguoi buoc ra khoi camera trong 50 frames
+        for _ in range(50):
+            tracker.update(empty_b, dummy_img)
+
+        # Nguoi buoc vao lai camera -> track_buffer=120 phai giu nguyen ID ban dau, khong duoc nhay so
+        res_back = tracker.update(b_person, dummy_img)
+        self.assertEqual(len(res_back), 1)
+        reid_id = int(res_back[0][4])
+        self.assertEqual(reid_id, initial_id, f"ID must persist after 50 frames absent, got {reid_id} vs {initial_id}")
 
 
 if __name__ == "__main__":

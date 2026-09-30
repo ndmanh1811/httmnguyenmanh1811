@@ -25,8 +25,10 @@ import cv2
 import imageio
 import numpy as np
 import supervision as sv
+from types import SimpleNamespace
 from huggingface_hub import hf_hub_download
 from ultralytics import YOLO
+from ultralytics.trackers.byte_tracker import BYTETracker
 
 from enhancements import apply_adaptive_clahe
 
@@ -172,6 +174,21 @@ class PPEDetector:
         self._last_ppe_inference_time: float = 0.0
         self._off_slot_ppe_count: int = 0
 
+        # Person-only ByteTracker: chi theo doi class Person, tuyet doi khong ton ID cho vat pham PPE
+        self._tracker_args = SimpleNamespace(
+            track_high_thresh=0.45,
+            track_low_thresh=0.15,
+            new_track_thresh=0.50, # Nguong toi thieu tao track nguoi moi (chong nhiễu phong trong)
+            track_buffer=120,      # Duy tri track 120 frames (~4-5s) khi nguoi buoc ra khoi camera
+            match_thresh=0.80,
+            fuse_score=True,
+        )
+        self._person_tracker: BYTETracker | None = None
+        try:
+            self._person_tracker = BYTETracker(self._tracker_args)
+        except Exception as e:
+            logger.warning("Could not initialize standalone BYTETracker: %s", e)
+
     def reset(self) -> None:
         """Reset toan bo bo nho theo doi nguoi, PPE va visual persistence cache."""
         self._ppe_memory.clear()
@@ -186,6 +203,11 @@ class PPEDetector:
         }
         self._last_ppe_inference_time = 0.0
         self._off_slot_ppe_count = 0
+        if getattr(self, "_tracker_args", None) is not None:
+            try:
+                self._person_tracker = BYTETracker(self._tracker_args)
+            except Exception:
+                pass
         self.last_detected_persons = []
         self.last_person_boxes = []
 
@@ -422,23 +444,20 @@ class PPEDetector:
                     except Exception as e:
                         logger.warning("SAHI prediction failed, fallback to standard track: %s", e)
 
-            # Standard ByteTrack inference (Realtime Camera Stream hoac khi use_sahi=False)
+            # Standard Person-Only ByteTrack inference (Realtime Camera Stream hoac khi use_sahi=False)
             if not candidate_persons and not candidate_ppe and not (use_sahi and getattr(self, "_sahi_model", None)):
-                track_kwargs: dict[str, Any] = {
-                    "conf": self.conf,
-                    "iou": self.iou,
-                    "imgsz": imgsz,
-                    "verbose": False,
-                }
-                try:
-                    results = self.model.track(ppe_frame, persist=True, tracker="bytetrack.yaml", **track_kwargs)
-                except Exception:
-                    results = self.model.predict(ppe_frame, conf=self.conf, iou=self.iou, imgsz=imgsz, verbose=False)
-
+                results = self.model.predict(
+                    ppe_frame,
+                    conf=self.conf,
+                    iou=self.iou,
+                    imgsz=imgsz,
+                    verbose=False,
+                )
                 r = results[0]
                 boxes = r.boxes
                 names = r.names
 
+                person_indices = []
                 for i, box in enumerate(boxes):
                     cls_id = int(box.cls[0])
                     label = names.get(cls_id, str(cls_id))
@@ -447,12 +466,7 @@ class PPEDetector:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
 
                     if low_label in ("person", "worker", "people"):
-                        track_id = int(box.id[0]) if (hasattr(box, "id") and box.id is not None) else (i + 1)
-                        candidate_persons.append({
-                            "id": track_id,
-                            "bbox": [x1, y1, x2, y2],
-                            "conf": conf_score,
-                        })
+                        person_indices.append(i)
                     else:
                         ppe_res = _classify_label(label)
                         if ppe_res is not None:
@@ -472,6 +486,39 @@ class PPEDetector:
                                 "bbox": [x1, y1, x2, y2],
                                 "center": (cx, cy),
                             })
+
+                # ByteTrack CHỈ theo dõi class person, tuyệt đối không cấp ID cho mũ, áo, khẩu trang hay đồ vật nền
+                if getattr(self, "_person_tracker", None) is not None:
+                    if person_indices:
+                        person_boxes = boxes[person_indices].cpu().numpy() if hasattr(boxes, "cpu") else boxes[person_indices]
+                        tracks = self._person_tracker.update(person_boxes, r.orig_img)
+                        if len(tracks) > 0:
+                            for track in tracks:
+                                x1, y1, x2, y2, track_id, conf_score = track[:6]
+                                candidate_persons.append({
+                                    "id": int(track_id),
+                                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                                    "conf": float(conf_score),
+                                })
+                        else:
+                            for pi in person_indices:
+                                pbox = boxes[pi]
+                                candidate_persons.append({
+                                    "id": pi + 1,
+                                    "bbox": list(map(int, pbox.xyxy[0])),
+                                    "conf": float(pbox.conf[0]),
+                                })
+                    else:
+                        empty_boxes = boxes[[]].cpu().numpy() if hasattr(boxes, "cpu") else []
+                        self._person_tracker.update(empty_boxes, r.orig_img)
+                else:
+                    for pi in person_indices:
+                        pbox = boxes[pi]
+                        candidate_persons.append({
+                            "id": pi + 1,
+                            "bbox": list(map(int, pbox.xyxy[0])),
+                            "conf": float(pbox.conf[0]),
+                        })
 
             # STAGE 1: XAC THUC NGUOI THAT (Cross-verification voi Pose Model & Do sac net canh)
             h_f, w_f = frame.shape[:2]
@@ -763,6 +810,12 @@ class PPEDetector:
         else:
             # User tat PPE hoan toan -> Khong bao gio dung cache, xoa sach du lieu PPE
             self._off_slot_ppe_count = 0
+            self._ppe_memory.clear()
+            if getattr(self, "_tracker_args", None) is not None:
+                try:
+                    self._person_tracker = BYTETracker(self._tracker_args)
+                except Exception:
+                    pass
             person_items = []
             assigned_ppe_items = []
             violations = []
