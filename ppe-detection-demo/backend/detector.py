@@ -345,32 +345,13 @@ class PPEDetector:
                         fire_boxes.append(fb)
         hazard_boxes = smoke_boxes + fire_boxes
 
-        # 2. FALL DETECT (chay tren frame sach, xac thuc khung xuong nguoi that, loai bo ao giac do khoi)
-        falls = []
+        # 2. GET verified_pose_persons from PREVIOUS frame's fall detection (for PPE cross-verification)
+        # This avoids running fall detector twice per frame
         verified_pose_persons = []
         if fall_detector is not None:
-            if enable_fall:
-                try:
-                    detected_falls = fall_detector.detect(
-                        frame,
-                        smoke_boxes=smoke_boxes,
-                        imgsz=imgsz,
-                        use_clahe=use_clahe,
-                        use_sahi=use_sahi,
-                        timestamp=now,
-                    )
-                except TypeError:
-                    detected_falls = fall_detector.detect(
-                        frame,
-                        smoke_boxes=smoke_boxes,
-                        imgsz=imgsz,
-                        use_clahe=use_clahe,
-                        use_sahi=use_sahi,
-                    )
-                falls = detected_falls
             verified_pose_persons = getattr(fall_detector, "last_detected_persons", [])
 
-        # 3. PPE DETECTION (Stage 1: Xac thuc nguoi; Stage 2: Danh gia PPE gan voi nguoi)
+        # 3. PPE DETECTION with ByteTrack (chay de lay track_id cho sync)
         should_run_ppe = enable_ppe and (run_ppe_inference is None or run_ppe_inference)
         if should_run_ppe:
             ppe_frame = apply_adaptive_clahe(frame) if (use_clahe and frame is not None and getattr(frame, "size", 0) > 0) else frame
@@ -669,6 +650,36 @@ class PPEDetector:
                         "person_id": p["id"],
                         "label": PPE_LABELS_VI["mask"],
                     })
+
+        # 3. FALL DETECT (sau PPE de lay ByteTrack track_ids de sync ID)
+        falls = []
+        if fall_detector is not None:
+            if enable_fall:
+                try:
+                    # Lay ByteTrack IDs tu person_items de sync voi fall detector
+                    ppe_track_ids = [p["id"] for p in person_items] if person_items else []
+                    detected_falls = fall_detector.detect(
+                        frame,
+                        smoke_boxes=smoke_boxes,
+                        imgsz=imgsz,
+                        use_clahe=use_clahe,
+                        use_sahi=use_sahi,
+                        timestamp=now,
+                        ppe_track_ids=ppe_track_ids,
+                    )
+                except TypeError:
+                    # Fallback cho phien ban cu khong co tham so ppe_track_ids
+                    detected_falls = fall_detector.detect(
+                        frame,
+                        smoke_boxes=smoke_boxes,
+                        imgsz=imgsz,
+                        use_clahe=use_clahe,
+                        use_sahi=use_sahi,
+                        timestamp=now,
+                    )
+                falls = detected_falls
+            # Cap nhat verified_pose_persons cho frame tiep theo
+            # (se duoc lay o dau ham bang getattr(fall_detector, "last_detected_persons", []))
 
         # Visual Persistence Cache cho PPE:
         if enable_ppe:

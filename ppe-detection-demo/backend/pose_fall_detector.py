@@ -185,15 +185,34 @@ class PoseFallDetector:
     # Matching
     # ------------------------------------------------------------------
 
-    def _match_to_prev(self, new_bboxes: list[list[int]]) -> list[int | None]:
+    def _match_to_prev(
+        self,
+        new_bboxes: list[list[int]],
+        ppe_track_ids: list[int] | None = None,
+    ) -> list[int | None]:
         matched: list[int | None] = [None] * len(new_bboxes)
         if not self._prev_persons:
             return matched
 
         used_prev: set[int] = set()
 
+        # Giai đoạn 0: ByteTrack ID Matching (ưu tiên cao nhất - khớp ID chính xác từ PPE detector)
+        if ppe_track_ids is not None and len(ppe_track_ids) == len(new_bboxes):
+            for new_i, track_id in enumerate(ppe_track_ids):
+                if track_id <= 0:
+                    continue
+                for j, prev in enumerate(self._prev_persons):
+                    if j in used_prev:
+                        continue
+                    if prev.get("track_id") == track_id:
+                        matched[new_i] = j
+                        used_prev.add(j)
+                        break
+
         # Giai đoạn 1: IoU Matching (chính xác tuyệt đối khi bounding box giao nhau)
         for new_i, bbox in enumerate(new_bboxes):
+            if matched[new_i] is not None:
+                continue
             best_iou = 0.20
             best_j = None
             for j, prev in enumerate(self._prev_persons):
@@ -770,6 +789,7 @@ class PoseFallDetector:
         use_clahe: bool = False,
         use_sahi: bool = False,
         timestamp: float | None = None,
+        ppe_track_ids: list[int] | None = None,
     ) -> list[dict]:
         proc_frame = apply_adaptive_clahe(frame) if (use_clahe and frame is not None and getattr(frame, "size", 0) > 0) else frame
         curr_time = time.time() if timestamp is None else timestamp
@@ -818,7 +838,7 @@ class PoseFallDetector:
                 self._is_fall_confirmed = False
             return falls
 
-        matched_prev = self._match_to_prev(global_bboxes)
+        matched_prev = self._match_to_prev(global_bboxes, ppe_track_ids)
         new_prev_persons: list[dict] = []
         active_pids: set[int] = set()
 
@@ -848,11 +868,26 @@ class PoseFallDetector:
                 continue
 
             prev_idx = matched_prev[i]
+            # Get the ByteTrack track_id if this was matched via Phase 0 (ByteTrack ID matching)
+            matched_track_id = None
+            if (prev_idx is not None and ppe_track_ids is not None 
+                and i < len(ppe_track_ids) and ppe_track_ids[i] > 0
+                and self._prev_persons[prev_idx].get("track_id") == ppe_track_ids[i]):
+                matched_track_id = ppe_track_ids[i]
+            
             if prev_idx is not None and "pid" in self._prev_persons[prev_idx]:
                 pid = self._prev_persons[prev_idx]["pid"]
+                # If we have a ByteTrack track_id match, update the stored track_id
+                if matched_track_id is not None:
+                    # Keep existing pid but update track_id for future matching
+                    pass
             else:
-                pid = self._next_person_id
-                self._next_person_id += 1
+                # If matched via ByteTrack ID, use that track_id as pid for consistency
+                if matched_track_id is not None:
+                    pid = matched_track_id
+                else:
+                    pid = self._next_person_id
+                    self._next_person_id += 1
             active_pids.add(pid)
 
             prev_kpts = self._prev_persons[prev_idx]["kpts"] if prev_idx is not None else None
@@ -1042,6 +1077,7 @@ class PoseFallDetector:
                 "bbox": [x1, y1, x2, y2],
                 "kpts": kpts,
                 "pid": pid,
+                "track_id": ppe_track_ids[i] if (ppe_track_ids is not None and i < len(ppe_track_ids)) else None,
                 "lost_count": 0,
             })
 
