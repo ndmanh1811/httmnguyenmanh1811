@@ -525,6 +525,14 @@ class PPEDetector:
             for cp in candidate_persons:
                 cx1, cy1, cx2, cy2 = cp["bbox"]
                 c_conf = cp["conf"]
+                
+                # Bbox minimum area filter: bo qua candidate qua nho (< 30x30 = 900px)
+                # Thong thuong do tàn tro, đốm sáng, đầu vòi xịt
+                bw = cx2 - cx1
+                bh = cy2 - cy1
+                if bw * bh < 900:  # 30x30 = 900px
+                    continue
+                
                 in_hazard = _is_in_smoke_or_fire([cx1, cy1, cx2, cy2], hazard_boxes, threshold=0.28)
 
                 rx1, ry1 = max(0, cx1), max(0, cy1)
@@ -536,8 +544,6 @@ class PPEDetector:
                     sharpness = float(cv2.Laplacian(gray_roi, cv2.CV_64F).var())
 
                 is_valid = False
-                bw = cx2 - cx1
-                bh = cy2 - cy1
                 # Loai bo cac dam khoi hoac mang tuong to lon o phia tren khung hinh bi nhan nham thanh nguoi
                 is_sky_or_smoke_plume = (cy1 <= 25 and (bw > 240 or bh > 0.55 * h_f))
 
@@ -563,6 +569,38 @@ class PPEDetector:
                         else:
                             if c_conf >= 0.60 and sharpness >= 30.0:
                                 is_valid = True
+
+                # SAFE CROSS-VERIFICATION IN SMOKE:
+                # Khi nguoi trong vung khói/nguy hiem, KHONG reject based on overlap.
+                # Thay vào đó: chi chap nhan neu Pose da verify skeleton ≥2 frames 
+                # voi Torso Core + Sharpness >= 30.0 (khong phải 40).
+                if in_hazard and fall_detector is not None:
+                    # Tim verified_pose_person khop voi candidate nay
+                    matched_vp = None
+                    for vp in verified_pose_persons:
+                        if _calc_box_iou(cp["bbox"], vp["bbox"]) >= 0.15:
+                            matched_vp = vp
+                            break
+                    
+                    if matched_vp is not None:
+                        # Kiem tra xem Pose detector da verify skeleton ≥2 frames cho track_id nay
+                        # vp["pid"] la track_id (ByteTrack ID)
+                        vp_pid = vp.get("pid", vp.get("id"))
+                        skeleton_frames = getattr(fall_detector, "_skeleton_valid_frames", {}).get(vp_pid, 0)
+                        
+                        if skeleton_frames >= 2:
+                            # Pose da verify ≥2 frames: kiem tra Torso Core va Sharpness
+                            vp_kpts = vp.get("keypoints")
+                            if vp_kpts is not None:
+                                has_shoulder = (vp_kpts[5][2] >= 0.45 or vp_kpts[6][2] >= 0.45)
+                                l_hip, r_hip = vp_kpts[11][2], vp_kpts[12][2]
+                                has_hip = (l_hip >= 0.45 or r_hip >= 0.45)
+                                if has_shoulder and has_hip and sharpness >= 30.0:
+                                    is_valid = True
+                        # Neu khong du dieu kien -> is_valid = False (giu nguyen False mac dinh)
+                    else:
+                        # Khong co verified_pose_person khop -> khong hop le trong hazard
+                        is_valid = False
 
                 if is_valid:
                     person_items.append({

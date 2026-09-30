@@ -7,6 +7,8 @@ python-socketio>=5.11.0
 python-engineio>=4.9.0
 simple-websocket>=1.0.0
 SQLAlchemy>=2.0.0
+pymysql>=1.1.0
+cryptography>=41.0.0
 Werkzeug>=3.0.0
 
 # Deep Learning & Computer Vision

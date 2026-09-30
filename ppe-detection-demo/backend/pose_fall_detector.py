@@ -161,12 +161,17 @@ class PoseFallDetector:
         self._standing_height: dict[int, float] = {}
         self._pose_filter = OneEuroPoseFilter()
 
+        # Temporal Skeleton Consistency: theo doi so frame lien tiep skeleton hop le cho moi track_id
+        # Key: track_id (pid), Value: consecutive valid frames
+        self._skeleton_valid_frames: dict[int, int] = {}
+
     def reset(self) -> None:
         """Reset toàn bộ trạng thái tracking và phát hiện ngã khi bắt đầu video mới."""
         self._last_detected_persons.clear()
         self._prev_persons.clear()
         self._cached_detected_persons.clear()
         self._last_detected_time = 0.0
+        self._skeleton_valid_frames.clear()
         self._bb_history.clear()
         self._cy_history.clear()
         self._fall_frames.clear()
@@ -402,12 +407,21 @@ class PoseFallDetector:
         bbox: list[int],
         frame: np.ndarray | None = None,
         is_in_smoke: bool = False,
+        track_id: int | None = None,
+        require_temporal: bool = True,
     ) -> tuple[bool, str]:
         """
         Xac minh cau truc giai phau nguoi thuc te (Human Skeleton Integrity Gate).
         Loai bo triet de cac diem khop ao giac sinh ra ben trong dam khoi, hoi nuoc, lua hoac do vat.
+        
+        Cac nang cao:
+        1. Laplacian Texture Gate: Luon chay, khong chi khi is_in_smoke. Khói mo co lap_var < 25.
+        2. Torso Core Integrity: Bat buoc phai co vai (5,6) VA hông (11,12) conf >= 0.45 (khi trong khói).
+        3. Anatomical Span: Threshold 0.20, logic OR (width < 20% HOAC height < 20% -> reject).
+        4. Temporal Consistency: Yeu cầu skeleton hop le ≥ 2 frame liên tiếp mới xuất xưởng.
         """
-        min_kpt_conf = 0.35 if is_in_smoke else 0.20
+        # 1. Ngưỡng confidence keypoint
+        min_kpt_conf = 0.45 if is_in_smoke else 0.20
         valid_kpts = [k for k in kpts if k[2] >= min_kpt_conf]
         num_valid = len(valid_kpts)
 
@@ -415,34 +429,37 @@ class PoseFallDetector:
         if num_valid < min_required:
             return False, f"Keypoint count too low ({num_valid} < {min_required})"
 
-        # 1. Khung than tren / That lung (Torso Core: Shoulders 5,6 va Hips 11,12)
+        # 2. Torso Core Integrity (Vai + Hông) - Bat buoc khi trong khói
         has_shoulder = (kpts[5][2] >= min_kpt_conf or kpts[6][2] >= min_kpt_conf)
         l_hip, r_hip = kpts[11][2], kpts[12][2]
         has_hip = (l_hip >= min_kpt_conf or r_hip >= min_kpt_conf)
 
-        # 2. Khung than duoi (Lower body: Hips hoac Knees)
+        if is_in_smoke:
+            # Trong khói: bat buoc phai co TORSO CORE (vai + hông) voi conf >= 0.45
+            if not (has_shoulder and has_hip):
+                return False, "Missing human torso core in smoke (shoulders AND hips required)"
+
+        # Lower body (hips hoặc knees)
         l_knee, r_knee = kpts[13][2], kpts[14][2]
         has_lower_body = has_hip or (l_knee >= min_kpt_conf or r_knee >= min_kpt_conf)
         if is_in_smoke and not has_lower_body:
             return False, "Missing lower body (smoke phantom has no hips/legs)"
 
-        if is_in_smoke and not (has_shoulder and has_hip):
-            if num_valid < 7:
-                return False, "Missing human torso core (shoulders or hips missing)"
-
-        # 3. Kiem tra do sac net ket cau bien (Laplacian Edge Variance)
-        # Chi ap dung kiem tra do mo giong khoi khi dang nam trong vung khoi
-        if is_in_smoke and frame is not None and getattr(frame, "size", 0) > 0:
+        # 3. Laplacian Texture Gate - LUON CHAY, khong chi khi is_in_smoke
+        # Khói cuộn mờ ảo có lap_var < 25.0
+        if frame is not None and getattr(frame, "size", 0) > 0:
             x1, y1, x2, y2 = bbox
             h_f, w_f = frame.shape[:2]
             crop = frame[max(0, y1):min(h_f, y2), max(0, x1):min(w_f, x2)]
             if crop.size > 100:
                 gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                 lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-                if lap_var < 20.0:
-                    return False, f"Blurry texture like smoke (Laplacian={lap_var:.1f} < 20)"
+                # Ngưỡng adaptive: 25 khi co smoke overlap, 20 mặc định
+                lap_threshold = 25.0 if is_in_smoke else 20.0
+                if lap_var < lap_threshold:
+                    return False, f"Blurry texture like smoke (Laplacian={lap_var:.1f} < {lap_threshold})"
 
-        # 4. Do bao phu khong gian giai phau (Anatomical span)
+        # 4. Anatomical Span - Logic OR, threshold 0.20
         x1, y1, x2, y2 = bbox
         bw = max(x2 - x1, 1)
         bh = max(y2 - y1, 1)
@@ -451,8 +468,26 @@ class PoseFallDetector:
         kpt_w = max(xs) - min(xs)
         kpt_h = max(ys) - min(ys)
 
-        if (kpt_w / bw < 0.12) and (kpt_h / bh < 0.12):
-            return False, "Keypoints tightly clustered (phantom noise)"
+        # Logic OR: nếu width < 20% HOẶC height < 20% -> reject (khói vệt ngang hoặc dọc)
+        if (kpt_w / bw < 0.20) or (kpt_h / bh < 0.20):
+            return False, f"Keypoints span too narrow (w={kpt_w/bw:.2f}, h={kpt_h/bh:.2f} < 0.20)"
+
+        # 5. Temporal Consistency - yeu cau ≥ 2 frame liên tiếp
+        if require_temporal and track_id is not None:
+            current_valid = self._skeleton_valid_frames.get(track_id, 0)
+            # Frame nay hop le, tang counter
+            self._skeleton_valid_frames[track_id] = current_valid + 1
+            if self._skeleton_valid_frames[track_id] < 2:
+                return False, f"Temporal gate: skeleton valid only {self._skeleton_valid_frames[track_id]}/2 frames"
+        elif track_id is not None:
+            # Không yêu cầu temporal (vd: frame đầu tiên), reset counter
+            self._skeleton_valid_frames[track_id] = 1
+
+        # Cleanup stale skeleton tracking
+        if track_id is not None:
+            active_ids = set()
+            # Sẽ được cập nhật ở detect() sau khi có danh sách track_id hợp lệ
+            pass
 
         return True, "Valid skeleton"
 
@@ -805,6 +840,7 @@ class PoseFallDetector:
             self._fall_latch.pop(stale_pid, None)
             self._kpt_motion_history.pop(stale_pid, None)
             self._standing_height.pop(stale_pid, None)
+            self._skeleton_valid_frames.pop(stale_pid, None)
         self._pose_filter.cleanup_stale(active_pids)
 
     # ------------------------------------------------------------------
@@ -891,23 +927,30 @@ class PoseFallDetector:
                             is_in_smoke = True
                             break
 
-            # Kiem tra tinh toan ven cua khung xuong nguoi that (loai bo ao giac khoi/vat the)
-            is_valid_human, reason = self._is_valid_human_skeleton(raw_kpts, [x1, y1, x2, y2], frame=proc_frame, is_in_smoke=is_in_smoke)
-            if not is_valid_human:
-                logger.debug("Bo qua candidate pose khong phai nguoi that: %s", reason)
-                continue
-
             prev_idx = matched_prev[i]
-            
-            # Handle Phase 0 marker: "BYTE_ID:<track_id>" -> assign ByteTrack ID as pid directly
             real_prev_idx = None
             if isinstance(prev_idx, str) and prev_idx.startswith("BYTE_ID:"):
-                pid = int(prev_idx.split(":")[1])
+                candidate_pid = int(prev_idx.split(":")[1])
             elif isinstance(prev_idx, int) and prev_idx is not None and "pid" in self._prev_persons[prev_idx]:
-                pid = self._prev_persons[prev_idx]["pid"]
+                candidate_pid = self._prev_persons[prev_idx]["pid"]
                 real_prev_idx = prev_idx
             else:
-                pid = self._next_person_id
+                candidate_pid = self._next_person_id
+
+            # Kiem tra tinh toan ven cua khung xuong nguoi that (loai bo ao giac khoi/vat the)
+            is_valid_human, reason = self._is_valid_human_skeleton(
+                raw_kpts, [x1, y1, x2, y2], frame=proc_frame, 
+                is_in_smoke=is_in_smoke, track_id=candidate_pid, require_temporal=True
+            )
+            if not is_valid_human:
+                logger.debug("Bo qua candidate pose khong phai nguoi that: %s", reason)
+                # Reset temporal counter for invalid skeleton
+                if candidate_pid in self._skeleton_valid_frames:
+                    del self._skeleton_valid_frames[candidate_pid]
+                continue
+
+            pid = candidate_pid
+            if prev_idx is None or (not (isinstance(prev_idx, str) and prev_idx.startswith("BYTE_ID:")) and real_prev_idx is None):
                 self._next_person_id += 1
 
             self._next_person_id = max(self._next_person_id, pid + 1)

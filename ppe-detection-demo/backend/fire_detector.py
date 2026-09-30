@@ -798,7 +798,11 @@ class FireSmokeStreamAnalyzer:
 
         # Thời gian score phải nằm dưới ngưỡng exit trước khi một track verified
         # bị hủy — chống nhấp nháy alert khi score dao động quanh ngưỡng.
-        self.hysteresis_exit_sec = 1.5
+        self.hysteresis_exit_sec = 0.6
+
+        # Scene Change Detection: đếm frame liên tiếp không có candidate khói/lửa
+        # Nếu >= 2 frame liên tiếp 0 candidate -> force clear verified tracks (chuyển cảnh / dập tắt)
+        self._zero_candidate_frames: int = 0
 
         self.fire_scorer = FireScorer()
         self.smoke_scorer = SmokeScorer()
@@ -1004,12 +1008,24 @@ class FireSmokeStreamAnalyzer:
         # Update last gray frame for next optical flow step
         self._last_gray_frame = curr_gray
 
-        # Cleanup stale tracks (> 1.2 seconds without detection)
+        # Scene Change / Zero-Candidate Detection:
+        # Nếu không có candidate nào trong frame nay -> tang zero_candidate_frames
+        # Neu >= 2 frame lien tiep khong co candidate -> force clear verified tracks (scene cut)
+        if len(active_candidates) == 0:
+            self._zero_candidate_frames += 1
+            if self._zero_candidate_frames >= 2:
+                for tid in list(self._tracks.keys()):
+                    self._tracks[tid]["verified"] = False
+                self._zero_candidate_frames = 0
+        else:
+            self._zero_candidate_frames = 0
+
+        # Cleanup stale tracks (> 0.5 seconds without detection) - giam tu 1.2s xuong 0.5s
         if timestamp - self._last_cleanup_time > 0.5:
             self._last_cleanup_time = timestamp
             stale_ids = [
                 tid for tid, tr in self._tracks.items()
-                if (timestamp - tr["last_seen"]) > 1.2
+                if (timestamp - tr["last_seen"]) > 0.5
             ]
             for tid in stale_ids:
                 del self._tracks[tid]
@@ -1081,6 +1097,7 @@ class FireSmokeStreamAnalyzer:
         self._next_track_id = 1
         self._last_gray_frame = None
         self._last_cleanup_time = 0.0
+        self._zero_candidate_frames = 0
 
 
 # Compatibility alias: FireSmokeDetector maps to FireSmokeStreamAnalyzer
