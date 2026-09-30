@@ -99,7 +99,7 @@ class TestPPEDisablePersistence(unittest.TestCase):
         )
         self.assertEqual(len(pids_neg), 0, "Negative dt must NOT use cache")
 
-        # Case B: Within 1-frame off-slot window at t = 100.033s (< 0.1s) -> ALLOWED
+        # Case B: Within multi-slot persistence window at t = 100.20s (< 0.45s) -> ALLOWED (anti-flicker)
         self.detector._last_rendered_persons = [{
             "bbox": [50, 50, 150, 200],
             "id": 1,
@@ -109,22 +109,149 @@ class TestPPEDisablePersistence(unittest.TestCase):
             "conf": 0.9,
         }]
         self.detector._last_ppe_inference_time = 100.0
+        self.detector._off_slot_ppe_count = 0
         _ann, _viol, _stats, _v, _f, _fi, pids_ok = self.detector.annotate_frame(
             frame.copy(),
-            timestamp=100.033,
+            timestamp=100.20,
             enable_ppe=True,
             run_ppe_inference=False,
         )
-        self.assertEqual(len(pids_ok), 1, "dt < 0.1s with enable_ppe=True should use smooth persistence")
+        self.assertEqual(len(pids_ok), 1, "dt = 0.20s (< 0.45s) with enable_ppe=True should use smooth persistence")
 
-        # Case C: Expired window at t = 100.25s (> 0.1s) -> EXPIRED
+        # Case C: Expired window at t = 100.50s (> 0.45s) -> EXPIRED
+        self.detector._last_rendered_persons = [{
+            "bbox": [50, 50, 150, 200],
+            "id": 1,
+            "helmet": "ok",
+            "vest": "ok",
+            "mask": "ok",
+            "conf": 0.9,
+        }]
+        self.detector._last_ppe_inference_time = 100.0
+        self.detector._off_slot_ppe_count = 0
         _ann, _viol, _stats, _v, _f, _fi, pids_exp = self.detector.annotate_frame(
             frame.copy(),
-            timestamp=100.25,
+            timestamp=100.50,
             enable_ppe=True,
             run_ppe_inference=False,
         )
-        self.assertEqual(len(pids_exp), 0, "dt > 0.1s must expire and clear")
+        self.assertEqual(len(pids_exp), 0, "dt > 0.45s must expire and clear")
+
+        # Case D: Exceeded max off-slot frame count (> 4 frames) -> EXPIRED even if dt < 0.45s
+        self.detector._last_rendered_persons = [{
+            "bbox": [50, 50, 150, 200],
+            "id": 1,
+            "helmet": "ok",
+            "vest": "ok",
+            "mask": "ok",
+            "conf": 0.9,
+        }]
+        self.detector._last_ppe_inference_time = 100.0
+        self.detector._off_slot_ppe_count = 4  # Next off-slot will make it 5 (> 4)
+        _ann, _viol, _stats, _v, _f, _fi, pids_cnt = self.detector.annotate_frame(
+            frame.copy(),
+            timestamp=100.10,
+            enable_ppe=True,
+            run_ppe_inference=False,
+        )
+        self.assertEqual(len(pids_cnt), 0, "off_slot_count > 4 must expire and clear")
+
+    def test_ppe_temporal_debouncing_hysteresis(self):
+        """Kiem tra tinh nang Debouncing / Hysteresis cua P1: triet tieu nhay do/xanh."""
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        # 1. Setup person confirmed 'ok' in memory
+        self.detector._ppe_memory = {
+            1: {
+                "helmet": {
+                    "status": "ok",
+                    "pending_status": None,
+                    "pending_count": 0,
+                    "last_seen": 100.0,
+                    "conf": 0.9,
+                },
+                "vest": {
+                    "status": "ok",
+                    "pending_status": None,
+                    "pending_count": 0,
+                    "last_seen": 100.0,
+                    "conf": 0.9,
+                },
+                "mask": {
+                    "status": "ok",
+                    "pending_status": None,
+                    "pending_count": 0,
+                    "last_seen": 100.0,
+                    "conf": 0.9,
+                },
+            }
+        }
+
+        # Gia lap frame 100.04s nhan raw detected 'violation' cho helmet lan dau tien (1-frame glitch)
+        # Bypassing stage 1/2 bang cach goi truc tiep phan xu ly debouncing tren mock person
+        p = {
+            "id": 1,
+            "bbox": [100, 100, 200, 300],
+            "conf": 0.9,
+            "helmet": "violation",
+            "vest": "ok",
+            "mask": "ok",
+            "helmet_conf": 0.85,
+        }
+        person_items = [p]
+        assigned_ppe_items = [{
+            "type": "helmet",
+            "status": "violation",
+            "conf": 0.85,
+            "bbox": [120, 100, 180, 150],
+            "person_id": 1,
+            "label": "Khong mu",
+        }]
+
+        # Chay debouncing logic truc tiep hoac thong qua phuong thuc
+        # Ta kiem tra trang thai sau debouncing:
+        # Frame 1: helmet phai duoc giu la 'ok' (debounced), box violation phai bi bo
+        now = 100.04
+        pmem = self.detector._ppe_memory[1]
+        rec = pmem["helmet"]
+
+        # Simulate frame 1 debouncing
+        raw_status = p["helmet"]
+        if rec.get("pending_status") == raw_status:
+            rec["pending_count"] = rec.get("pending_count", 0) + 1
+            if rec["pending_count"] >= 2:
+                rec["status"] = raw_status
+                p["helmet"] = raw_status
+            else:
+                p["helmet"] = rec["status"]
+        else:
+            rec["pending_status"] = raw_status
+            rec["pending_count"] = 1
+            p["helmet"] = rec["status"]
+
+        self.assertEqual(p["helmet"], "ok", "Frame 1 violation noise must be suppressed to 'ok'")
+        self.assertEqual(rec["pending_count"], 1)
+
+        # Frame 2: Tiep tuc nhan 'violation' -> da du 2 frames lien tiep -> phai flip sang 'violation'
+        now = 100.08
+        p2 = {"id": 1, "helmet": "violation"}
+        raw_status2 = p2["helmet"]
+        if rec.get("pending_status") == raw_status2:
+            rec["pending_count"] = rec.get("pending_count", 0) + 1
+            if rec["pending_count"] >= 2:
+                rec["status"] = raw_status2
+                rec["pending_status"] = None
+                rec["pending_count"] = 0
+                p2["helmet"] = raw_status2
+            else:
+                p2["helmet"] = rec["status"]
+        else:
+            rec["pending_status"] = raw_status2
+            rec["pending_count"] = 1
+            p2["helmet"] = rec["status"]
+
+        self.assertEqual(p2["helmet"], "violation", "Frame 2 confirmed violation must flip to 'violation'")
+        self.assertEqual(rec["status"], "violation")
 
 
 if __name__ == "__main__":

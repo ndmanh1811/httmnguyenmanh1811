@@ -170,6 +170,7 @@ class PPEDetector:
             "mask": {"ok": 0, "violation": 0},
         }
         self._last_ppe_inference_time: float = 0.0
+        self._off_slot_ppe_count: int = 0
 
     def reset(self) -> None:
         """Reset toan bo bo nho theo doi nguoi, PPE va visual persistence cache."""
@@ -184,6 +185,7 @@ class PPEDetector:
             "mask": {"ok": 0, "violation": 0},
         }
         self._last_ppe_inference_time = 0.0
+        self._off_slot_ppe_count = 0
         self.last_detected_persons = []
         self.last_person_boxes = []
 
@@ -585,13 +587,10 @@ class PPEDetector:
                     if best_person is not None:
                         best_person[ppe_type] = ppe_status
                         best_person[f"{ppe_type}_conf"] = ppe["conf"]
+                        ppe["person_id"] = best_person["id"]
                         assigned_ppe_items.append(ppe)
 
-            # Cap nhat thong ke PPE CHI TU NHUNG VAT PHAM DA GAN VOI NGUOI XAC THUC
-            for ppe in assigned_ppe_items:
-                ppe_stats[ppe["type"]][ppe["status"]] += 1
-
-            # Ap dung bo nho trang thai PPE theo thoi gian (Temporal PPE Memory)
+            # P1: AP DUNG BO NHO VA HYSTERESIS DEBOUNCING CHO PPE
             for p in person_items:
                 pid = p["id"]
                 if pid not in self._ppe_memory:
@@ -599,27 +598,113 @@ class PPEDetector:
                 pmem = self._ppe_memory[pid]
 
                 for ppe_type in ("helmet", "vest", "mask"):
-                    curr = p[ppe_type]
-                    if curr == "ok":
+                    raw_status = p[ppe_type]  # "ok", "violation", hoac "unknown"
+                    raw_conf = p.get(f"{ppe_type}_conf", p["conf"])
+
+                    if ppe_type not in pmem:
                         pmem[ppe_type] = {
-                            "status": "ok",
-                            "last_seen": now,
-                            "conf": p.get(f"{ppe_type}_conf", p["conf"]),
+                            "status": "unknown",
+                            "pending_status": None,
+                            "pending_count": 0,
+                            "last_seen": 0.0,
+                            "conf": raw_conf,
                         }
-                    elif curr == "violation":
-                        pmem[ppe_type] = {
-                            "status": "violation",
-                            "last_seen": now,
-                            "conf": p.get(f"{ppe_type}_conf", p["conf"]),
-                        }
-                    else:  # curr == "unknown" (mat dau do chuyen dong nhanh, mo, quay mat)
-                        if ppe_type in pmem:
-                            last_rec = pmem[ppe_type]
-                            if last_rec["status"] == "ok" and (now - last_rec["last_seen"]) <= self.ppe_memory_duration:
+                    rec = pmem[ppe_type]
+
+                    if raw_status in ("ok", "violation"):
+                        if rec["status"] == "unknown":
+                            # Lan dau tien nhan dien vat pham cua nguoi nay
+                            if raw_status == "ok":
+                                rec["status"] = "ok"
+                                rec["pending_status"] = None
+                                rec["pending_count"] = 0
+                                rec["last_seen"] = now
+                                rec["conf"] = raw_conf
                                 p[ppe_type] = "ok"
-                                p[f"{ppe_type}_conf"] = last_rec["conf"]
-                                p[f"{ppe_type}_from_memory"] = True
-                                ppe_stats[ppe_type]["ok"] += 1
+                            else:  # raw_status == "violation"
+                                # Yeu cau 2 frames lien tiep xac nhan vi pham de tranh nhan nham frame dau
+                                if rec.get("pending_status") == "violation" and rec.get("pending_count", 0) >= 1:
+                                    rec["status"] = "violation"
+                                    rec["pending_status"] = None
+                                    rec["pending_count"] = 0
+                                    rec["last_seen"] = now
+                                    rec["conf"] = raw_conf
+                                    p[ppe_type] = "violation"
+                                else:
+                                    rec["pending_status"] = "violation"
+                                    rec["pending_count"] = rec.get("pending_count", 0) + 1
+                                    rec["last_seen"] = now
+                                    rec["conf"] = raw_conf
+                                    p[ppe_type] = "unknown"
+                        elif raw_status == rec["status"]:
+                            # Khop voi trang thai da xac nhan -> cap nhat last_seen va conf
+                            rec["pending_status"] = None
+                            rec["pending_count"] = 0
+                            rec["last_seen"] = now
+                            rec["conf"] = raw_conf
+                            p[ppe_type] = rec["status"]
+                        else:
+                            # Dao chieu trang thai (ok -> violation hoac violation -> ok)
+                            # Can it nhat 2 frames lien tiep cua raw_status de xac nhan lat trang thai (Debouncing)
+                            if rec.get("pending_status") == raw_status:
+                                rec["pending_count"] = rec.get("pending_count", 0) + 1
+                                if rec["pending_count"] >= 2:
+                                    rec["status"] = raw_status
+                                    rec["pending_status"] = None
+                                    rec["pending_count"] = 0
+                                    rec["last_seen"] = now
+                                    rec["conf"] = raw_conf
+                                    p[ppe_type] = raw_status
+                                else:
+                                    # Chua du 2 frames -> Duy tri trang thai cu de loai bo nhay mau (flicker)
+                                    p[ppe_type] = rec["status"]
+                                    p[f"{ppe_type}_conf"] = rec["conf"]
+                                    p[f"{ppe_type}_debounced"] = True
+                            else:
+                                rec["pending_status"] = raw_status
+                                rec["pending_count"] = 1
+                                p[ppe_type] = rec["status"]
+                                p[f"{ppe_type}_conf"] = rec["conf"]
+                                p[f"{ppe_type}_debounced"] = True
+                    else:
+                        # raw_status == "unknown" (khong nhin ro do goc quay, chuyen dong nhanh, bi che khuat)
+                        if rec["status"] in ("ok", "violation") and (now - rec["last_seen"]) <= self.ppe_memory_duration:
+                            p[ppe_type] = rec["status"]
+                            p[f"{ppe_type}_conf"] = rec["conf"]
+                            p[f"{ppe_type}_from_memory"] = True
+                        else:
+                            p[ppe_type] = "unknown"
+                        rec["pending_status"] = None
+                        rec["pending_count"] = 0
+
+                p["has_violation"] = (
+                    p["helmet"] == "violation" or p["vest"] == "violation" or p["mask"] == "violation"
+                )
+
+            # Loc assigned_ppe_items de bo hop thoai vi pham ao gay nhay khung tren dau / than
+            person_status_map = {
+                (p["id"], ppe_type): p[ppe_type]
+                for p in person_items
+                for ppe_type in ("helmet", "vest", "mask")
+            }
+            valid_assigned_ppe = []
+            for ppe in assigned_ppe_items:
+                pid = ppe.get("person_id")
+                ptype = ppe.get("type")
+                pstatus = person_status_map.get((pid, ptype))
+                if pstatus == "ok" and ppe.get("status") == "violation":
+                    continue
+                if pstatus == "violation" and ppe.get("status") == "ok":
+                    continue
+                valid_assigned_ppe.append(ppe)
+            assigned_ppe_items = valid_assigned_ppe
+
+            # Cap nhat thong ke PPE dua tren trang thai da duoc debounce cua tung nguoi
+            for p in person_items:
+                for ppe_type in ("helmet", "vest", "mask"):
+                    st = p[ppe_type]
+                    if st in ("ok", "violation"):
+                        ppe_stats[ppe_type][st] += 1
 
             # Don dep bo nho nguoi da roi khoi goc camera qua 20s
             for old_pid in list(self._ppe_memory.keys()):
@@ -627,7 +712,7 @@ class PPEDetector:
                 if now - last_activity > 20.0:
                     self._ppe_memory.pop(old_pid, None)
 
-            # Xac dinh vi pham cho tung person
+            # Xac dinh vi pham cho tung person (dua tren debounced status)
             for p in person_items:
                 if p["helmet"] == "violation":
                     violations.append({
@@ -650,6 +735,47 @@ class PPEDetector:
                         "person_id": p["id"],
                         "label": PPE_LABELS_VI["mask"],
                     })
+
+        # P0: Visual Persistence Cache cho PPE (chay ngay sau PPE de cung cap track_items cho Fall Detector tren moi frame)
+        if enable_ppe:
+            if should_run_ppe:
+                self._off_slot_ppe_count = 0
+                self._last_rendered_persons = list(person_items)
+                self._last_rendered_ppe_items = list(assigned_ppe_items)
+                self._last_rendered_violations = list(violations)
+                self._last_rendered_all_pids = [p["id"] for p in person_items]
+                self._last_rendered_stats = dict(ppe_stats)
+                self._last_ppe_inference_time = now
+            else:
+                # Khi should_run_ppe=False nhung user bat enable_ppe=True (cac frame slot Fall/Fire cua live cam)
+                self._off_slot_ppe_count += 1
+                dt = now - getattr(self, "_last_ppe_inference_time", 0.0)
+                # Cho phep su dung cache trong vong toi da 0.45s va toi da 4 off-slot frames
+                if 0.0 <= dt < 0.45 and self._off_slot_ppe_count <= 4:
+                    person_items = getattr(self, "_last_rendered_persons", [])
+                    assigned_ppe_items = getattr(self, "_last_rendered_ppe_items", [])
+                    violations = getattr(self, "_last_rendered_violations", [])
+                    ppe_stats = getattr(self, "_last_rendered_stats", ppe_stats)
+                else:
+                    person_items = []
+                    assigned_ppe_items = []
+                    violations = []
+        else:
+            # User tat PPE hoan toan -> Khong bao gio dung cache, xoa sach du lieu PPE
+            self._off_slot_ppe_count = 0
+            person_items = []
+            assigned_ppe_items = []
+            violations = []
+            self._last_rendered_persons = []
+            self._last_rendered_ppe_items = []
+            self._last_rendered_violations = []
+            self._last_rendered_all_pids = []
+            self._last_rendered_stats = {
+                "helmet": {"ok": 0, "violation": 0},
+                "vest": {"ok": 0, "violation": 0},
+                "mask": {"ok": 0, "violation": 0},
+            }
+            self._last_ppe_inference_time = 0.0
 
         # 3. FALL DETECT (sau PPE de lay ByteTrack track_ids de sync ID)
         falls = []
@@ -678,46 +804,6 @@ class PPEDetector:
                         timestamp=now,
                     )
                 falls = detected_falls
-            # Cap nhat verified_pose_persons cho frame tiep theo
-            # (se duoc lay o dau ham bang getattr(fall_detector, "last_detected_persons", []))
-
-        # Visual Persistence Cache cho PPE:
-        if enable_ppe:
-            if should_run_ppe:
-                self._last_rendered_persons = list(person_items)
-                self._last_rendered_ppe_items = list(assigned_ppe_items)
-                self._last_rendered_violations = list(violations)
-                self._last_rendered_all_pids = [p["id"] for p in person_items]
-                self._last_rendered_stats = dict(ppe_stats)
-                self._last_ppe_inference_time = now
-            else:
-                # Khi should_run_ppe=False nhung user bat enable_ppe=True (chi trong 1 frame slot Fall/Fire cua live cam)
-                # Chi tai su dung neu khoang cach thoi gian cuc ngan (0 <= dt < 0.1s ~2 frames), TUYET DOI khong chap nhan dt am hoac >0.1s
-                dt = now - getattr(self, "_last_ppe_inference_time", 0.0)
-                if 0.0 <= dt < 0.1:
-                    person_items = getattr(self, "_last_rendered_persons", [])
-                    assigned_ppe_items = getattr(self, "_last_rendered_ppe_items", [])
-                    violations = getattr(self, "_last_rendered_violations", [])
-                    ppe_stats = getattr(self, "_last_rendered_stats", ppe_stats)
-                else:
-                    person_items = []
-                    assigned_ppe_items = []
-                    violations = []
-        else:
-            # User tat PPE hoan toan -> Khong bao gio dung cache, xoa sach du lieu PPE
-            person_items = []
-            assigned_ppe_items = []
-            violations = []
-            self._last_rendered_persons = []
-            self._last_rendered_ppe_items = []
-            self._last_rendered_violations = []
-            self._last_rendered_all_pids = []
-            self._last_rendered_stats = {
-                "helmet": {"ok": 0, "violation": 0},
-                "vest": {"ok": 0, "violation": 0},
-                "mask": {"ok": 0, "violation": 0},
-            }
-            self._last_ppe_inference_time = 0.0
 
         # VE PPE ANNOTATION LEN FRAME (chi ve khi enable_ppe=True va co vat pham/nguoi hien tai)
         if enable_ppe and (person_items or assigned_ppe_items):
