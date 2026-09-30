@@ -13,16 +13,13 @@ stats_bp = Blueprint("stats", __name__)
 
 @stats_bp.route("/api/stats/summary", methods=["GET"])
 def get_summary():
-    # Tinh thoi diem bat dau ngay hom nay theo gio dia phuong (UTC+7)
+    # Tinh thoi diem bat dau ngay hom nay theo gio dia phuong (gio thuc)
     now_local = datetime.now()
-    today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # Vi timestamp trong SQLite luu theo UTC naive datetime
-    start_utc = today_start_local.astimezone(timezone.utc).replace(tzinfo=None)
-    twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    twenty_four_hours_ago = now_local - timedelta(hours=24)
 
     # Uu tien dem tu dau ngay hom nay (gio dia phuong)
-    today_filter = (Violation.timestamp >= start_utc)
+    today_filter = (Violation.timestamp >= today_start)
     total_today = Violation.query.filter(today_filter).count()
 
     # Neu sang som chua co vi pham moi, lay cua 24h qua de hien thi thong so y nghia

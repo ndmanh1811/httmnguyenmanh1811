@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -103,6 +103,7 @@ def create_app():
                     violation_type=alert_type,
                     confidence=confidence,
                     image_path=image_path,
+                    timestamp=datetime.now(),
                 )
                 db.session.add(violation)
                 db.session.commit()
@@ -136,6 +137,7 @@ def create_app():
                     violation_type="fall_detected",
                     confidence=confidence,
                     image_path=image_path,
+                    timestamp=datetime.now(),
                 )
                 db.session.add(violation)
                 db.session.commit()
@@ -171,6 +173,7 @@ def create_app():
                     violation_type=alert_type,
                     confidence=confidence,
                     image_path=image_path,
+                    timestamp=datetime.now(),
                 )
                 db.session.add(violation)
                 db.session.commit()

@@ -41,18 +41,16 @@ def get_violations():
             query = query.filter(Violation.violation_type == vtype)
 
     # 2. Loc theo moc thoi gian (quick filters)
-    now_utc = datetime.utcnow()
+    now_local = datetime.now()
     if time_range == "today":
-        now_local = datetime.now()
-        today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_utc = today_start_local.astimezone(timezone.utc).replace(tzinfo=None)
-        query = query.filter(Violation.timestamp >= start_utc)
+        today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        query = query.filter(Violation.timestamp >= today_start)
     elif time_range == "24h":
-        query = query.filter(Violation.timestamp >= now_utc - timedelta(hours=24))
+        query = query.filter(Violation.timestamp >= now_local - timedelta(hours=24))
     elif time_range == "7d":
-        query = query.filter(Violation.timestamp >= now_utc - timedelta(days=7))
+        query = query.filter(Violation.timestamp >= now_local - timedelta(days=7))
     elif time_range == "30d":
-        query = query.filter(Violation.timestamp >= now_utc - timedelta(days=30))
+        query = query.filter(Violation.timestamp >= now_local - timedelta(days=30))
 
     # 3. Loc theo khoang ngay tu-chon (custom date range) - override time_range neu co
     if from_date:
@@ -90,10 +88,36 @@ def get_violations():
     })
 
 
+@violation_bp.route("/api/violations", methods=["DELETE"])
+def clear_all_violations():
+    """Xoa toan bo lich su vi pham va cac file anh bang chung lien quan."""
+    try:
+        import os
+        from config import Config
+
+        # Xoa cac file anh bang chung trong thu muc static/evidence
+        if os.path.exists(Config.EVIDENCE_FOLDER):
+            for fname in os.listdir(Config.EVIDENCE_FOLDER):
+                fpath = os.path.join(Config.EVIDENCE_FOLDER, fname)
+                try:
+                    if os.path.isfile(fpath):
+                        os.remove(fpath)
+                except Exception:
+                    pass
+
+        count = Violation.query.delete()
+        db.session.commit()
+        return jsonify({"message": "Cleared all violations successfully", "deleted_count": count}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
 @violation_bp.route("/api/violations/stats/hourly", methods=["GET"])
 def get_hourly_violations():
-    # Lay phan bo trong 24 gio qua
-    start = datetime.utcnow() - timedelta(hours=24)
+    # Lay phan bo trong 24 gio qua theo gio dia phuong thuc
+    now_local = datetime.now()
+    start = now_local - timedelta(hours=24)
 
     violations = Violation.query.filter(
         Violation.timestamp >= start,
@@ -101,8 +125,8 @@ def get_hourly_violations():
 
     hourly = defaultdict(lambda: {"count": 0, "fall_count": 0, "fire_count": 0, "smoke_count": 0})
     for v in violations:
-        # Chuyen gio sang local gio Viet Nam (+7)
-        hour = (v.timestamp.hour + 7) % 24 if v.timestamp else 0
+        # Lay truc tiep gio dia phuong tu database
+        hour = v.timestamp.hour if v.timestamp else 0
         hourly[hour]["count"] += 1
         if v.violation_type in ("fall_detected", "fall_immobile"):
             hourly[hour]["fall_count"] += 1

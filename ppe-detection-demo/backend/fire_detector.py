@@ -1016,6 +1016,7 @@ class FireSmokeStreamAnalyzer:
             if self._zero_candidate_frames >= 2:
                 for tid in list(self._tracks.keys()):
                     self._tracks[tid]["verified"] = False
+                    self._tracks[tid]["hits"] = 0
                 self._zero_candidate_frames = 0
         else:
             self._zero_candidate_frames = 0

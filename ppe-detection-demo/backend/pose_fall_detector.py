@@ -427,6 +427,9 @@ class PoseFallDetector:
 
         min_required = 6 if is_in_smoke else 4
         if num_valid < min_required:
+            # Reset temporal counter on invalid
+            if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames:
+                del self._skeleton_valid_frames[track_id]
             return False, f"Keypoint count too low ({num_valid} < {min_required})"
 
         # 2. Torso Core Integrity (Vai + Hông) - Bat buoc khi trong khói
@@ -437,12 +440,16 @@ class PoseFallDetector:
         if is_in_smoke:
             # Trong khói: bat buoc phai co TORSO CORE (vai + hông) voi conf >= 0.45
             if not (has_shoulder and has_hip):
+                if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames:
+                    del self._skeleton_valid_frames[track_id]
                 return False, "Missing human torso core in smoke (shoulders AND hips required)"
 
         # Lower body (hips hoặc knees)
         l_knee, r_knee = kpts[13][2], kpts[14][2]
         has_lower_body = has_hip or (l_knee >= min_kpt_conf or r_knee >= min_kpt_conf)
         if is_in_smoke and not has_lower_body:
+            if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames:
+                del self._skeleton_valid_frames[track_id]
             return False, "Missing lower body (smoke phantom has no hips/legs)"
 
         # 3. Laplacian Texture Gate - LUON CHAY, khong chi khi is_in_smoke
@@ -457,6 +464,8 @@ class PoseFallDetector:
                 # Ngưỡng adaptive: 25 khi co smoke overlap, 20 mặc định
                 lap_threshold = 25.0 if is_in_smoke else 20.0
                 if lap_var < lap_threshold:
+                    if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames:
+                        del self._skeleton_valid_frames[track_id]
                     return False, f"Blurry texture like smoke (Laplacian={lap_var:.1f} < {lap_threshold})"
 
         # 4. Anatomical Span - Logic OR, threshold 0.20
@@ -470,9 +479,11 @@ class PoseFallDetector:
 
         # Logic OR: nếu width < 20% HOẶC height < 20% -> reject (khói vệt ngang hoặc dọc)
         if (kpt_w / bw < 0.20) or (kpt_h / bh < 0.20):
+            if require_temporal and track_id is not None and track_id in self._skeleton_valid_frames:
+                del self._skeleton_valid_frames[track_id]
             return False, f"Keypoints span too narrow (w={kpt_w/bw:.2f}, h={kpt_h/bh:.2f} < 0.20)"
 
-        # 5. Temporal Consistency - yeu cau ≥ 2 frame liên tiếp
+        # 5. Temporal Consistency - yeu cầu ≥ 2 frame liên tiếp
         if require_temporal and track_id is not None:
             current_valid = self._skeleton_valid_frames.get(track_id, 0)
             # Frame nay hop le, tang counter

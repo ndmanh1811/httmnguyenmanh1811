@@ -17,7 +17,7 @@ class Camera(db.Model):
     source = db.Column(db.String(255), nullable=False, default="0")
     location = db.Column(db.String(200), default="")
     is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
 
 
 class Violation(db.Model):
@@ -28,7 +28,7 @@ class Violation(db.Model):
     violation_type = db.Column(db.String(50), nullable=False)
     confidence = db.Column(db.Float, default=0.0)
     image_path = db.Column(db.String(500), default="")
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    timestamp = db.Column(db.DateTime, default=datetime.now, index=True)
 
 
 class DailyStats(db.Model):
@@ -61,8 +61,8 @@ class ExclusionZone(db.Model):
     zone_type = db.Column(db.String(50), default="welding")  # welding, kitchen, boiler, smoking, other
     polygon_points = db.Column(db.Text, nullable=False)      # JSON list: [[x, y], ...] normalized [0.0 - 1.0]
     is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
     def to_dict(self):
         import json
