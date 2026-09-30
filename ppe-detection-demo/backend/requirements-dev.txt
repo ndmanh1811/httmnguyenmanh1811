@@ -1,0 +1,5 @@
+# Development, Dataset Curation & Model Evaluation Only (Do NOT install on production runtime)
+fiftyone>=0.25.0
+jupyterlab>=4.0.0
+matplotlib>=3.7.0
+pytest>=7.0.0

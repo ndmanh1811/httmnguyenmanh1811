@@ -64,8 +64,14 @@ class FireSmokeModel:
     ):
         if weights_path is None:
             base_dir = os.path.dirname(os.path.abspath(__file__))
+            yolo26_path = os.path.join(base_dir, "models_dir", "fire_smoke_yolo26s.pt")
             default_path = os.path.join(base_dir, "models_dir", "fire_smoke_yolov8n.pt")
-            weights_path = default_path if os.path.exists(default_path) else "fire_smoke_yolov8n.pt"
+            if os.path.exists(yolo26_path):
+                weights_path = yolo26_path
+            elif os.path.exists(default_path):
+                weights_path = default_path
+            else:
+                weights_path = "fire_smoke_yolo26s.pt" if os.path.exists("fire_smoke_yolo26s.pt") else "fire_smoke_yolov8n.pt"
 
         self.weights_path = weights_path
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")

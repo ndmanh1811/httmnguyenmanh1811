@@ -17,8 +17,11 @@ import uuid
 from collections import deque
 
 import cv2
+import numpy as np
 
-from incident_lifecycle import IncidentLifecycleManager
+from incident_lifecycle import IncidentLifecycleManager, FALL_POLICY
+from frame_scheduler import FixedSlotScheduler
+from detector import check_workers_in_polygon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +89,9 @@ class CameraManager:
         buffer_len = max(30, int(30 * pre_event_seconds))
         self._pre_event_buffer = deque(maxlen=buffer_len)
 
+        # Per-stream Phase-Shifted Frame Scheduler
+        self.scheduler = FixedSlotScheduler()
+
         # Per-stream Incident Lifecycle (Class-specific duration & hysteresis)
         self.fire_lifecycle = IncidentLifecycleManager(
             confirm_duration_sec={"fire": 0.8, "smoke": 2.0},
@@ -94,6 +100,7 @@ class CameraManager:
             active_miss_grace_sec=1.5,
             resolved_after_sec=5.0,
         )
+        self.fall_lifecycle = IncidentLifecycleManager(policy=FALL_POLICY)
 
         self._running = threading.Event()
         self._frame_queue = queue.Queue(maxsize=1)
@@ -185,27 +192,43 @@ class CameraManager:
                 run_inference = (self.frame_skip <= 1) or (frame_idx % self.frame_skip == 0)
 
                 if run_inference:
-                    # Fire inference scheduling (interleaved based on fire_interval_frames)
-                    run_fire = self.enable_fire and self.fire_analyzer is not None and (
-                        (self.fire_interval_frames <= 1) or (frame_idx % self.fire_interval_frames == 0)
+                    # Phase-shifted multitask scheduling (FixedSlotScheduler: Fall and Fire NEVER run simultaneously)
+                    sched = self.scheduler.should_run(
+                        enable_ppe=self.enable_ppe,
+                        enable_fall=self.enable_fall and (self.fall_detector is not None),
+                        enable_fire=self.enable_fire and (self.fire_analyzer is not None),
                     )
-                    active_fire_det = self.fire_analyzer if run_fire else None
+
+                    active_fire_det = self.fire_analyzer if sched["run_fire"] else None
+                    render_fall_det = self.fall_detector if (self.enable_fall and self.fall_detector is not None) else None
 
                     annotated, has_violation, ppe_stats, violations, falls, fires, all_person_ids = self.detector.annotate_frame(
                         frame,
-                        fall_detector=self.fall_detector,
+                        fall_detector=render_fall_det,
                         fire_detector=active_fire_det,
                         timestamp=now,
                         enable_ppe=self.enable_ppe,
-                        enable_fall=self.enable_fall,
+                        run_ppe_inference=sched["run_ppe"],
+                        enable_fall=sched["run_fall"],
+                        exclusion_zones=self.exclusion_zones,
                     )
                     last_annotated = annotated
 
-                    if self.enable_ppe:
-                        self._check_tick(violations, annotated, frame, all_person_ids)
-                    if self.enable_fall:
-                        self._check_fall(falls, annotated, frame)
-                    if run_fire:
+                    if sched["run_ppe"]:
+                        worker_boxes = getattr(self.detector, "last_person_boxes", [])
+                        zone_violations = self._check_danger_zones(
+                            worker_boxes, annotated, frame, person_ids=all_person_ids, timestamp=now
+                        )
+                        combined_violations = list(violations)
+                        existing_keys = {(v.get("person_id"), v.get("type")) for v in combined_violations}
+                        for zv in zone_violations:
+                            if (zv.get("person_id"), zv.get("type")) not in existing_keys:
+                                combined_violations.append(zv)
+
+                        self._check_tick(combined_violations, annotated, frame, all_person_ids)
+                    if sched["run_fall"]:
+                        self._check_fall(falls, annotated, frame, now)
+                    if sched["run_fire"]:
                         self._check_fire(fires, annotated, frame, now)
                 else:
                     annotated = last_annotated if last_annotated is not None else frame
@@ -225,6 +248,57 @@ class CameraManager:
                 self._cap = None
             logger.info("Camera thread exiting, camera released")
 
+    def _check_danger_zones(
+        self,
+        worker_boxes: list[list[int]],
+        annotated_frame: np.ndarray,
+        raw_frame: np.ndarray,
+        person_ids: list[int] | None = None,
+        timestamp: float | None = None,
+    ) -> list[dict]:
+        """
+        Kiem tra nguoi lao dong (BOTTOM_CENTER / chan) co di vao vung nguy hiem / vung cam hay khong
+        su dung supervision.PolygonZone theo muc 7 trong ai_architecture_plan.md.
+        """
+        if not self.exclusion_zones or not worker_boxes:
+            return []
+
+        if timestamp is None:
+            timestamp = time.time()
+
+        h_f, w_f = raw_frame.shape[:2] if (raw_frame is not None and getattr(raw_frame, "size", 0) > 0) else (720, 1280)
+        zone_violations = []
+
+        for zone in self.exclusion_zones:
+            if not zone.get("is_active", True):
+                continue
+            raw_pts = zone.get("polygon_points") or zone.get("polygon") or []
+            if len(raw_pts) < 3:
+                continue
+
+            # Chuan hoa polygon coordinates neu o dang ty le [0, 1]
+            pts_arr = np.array(raw_pts, dtype=np.float32)
+            if pts_arr.max() <= 1.05:
+                poly = (pts_arr * [w_f, h_f]).astype(np.int32).tolist()
+            else:
+                poly = pts_arr.astype(np.int32).tolist()
+
+            matches = check_workers_in_polygon_zone(worker_boxes, poly)
+            for idx, in_zone in enumerate(matches):
+                if in_zone:
+                    pid = person_ids[idx] if (person_ids and idx < len(person_ids)) else (idx + 1)
+                    zone_name = zone.get("name") or zone.get("label") or f"Zone_{zone.get('id', 'danger')}"
+                    zone_violations.append({
+                        "type": "danger_zone",
+                        "person_id": pid,
+                        "confidence": 0.95,
+                        "zone_name": zone_name,
+                        "bbox": worker_boxes[idx],
+                        "label": f"Vung nguy hiem: {zone_name}",
+                    })
+
+        return zone_violations
+
     def _check_tick(self, violations, annotated_frame, raw_frame, all_person_ids=None):
         now = time.time()
 
@@ -243,8 +317,9 @@ class CameraManager:
             v_key = f"{pid}_{vtype}"
             self._person_violation_frames[v_key] = self._person_violation_frames.get(v_key, 0) + 1
 
-            # Ngưỡng xác nhận: >= 5 frames liên tiếp (~0.7 - 0.8 giây)
-            if self._person_violation_frames[v_key] >= 5:
+            # Ngưỡng xác nhận: >= 3 frames cho danger_zone, >= 5 frames cho PPE thông thường (~0.7 - 0.8 giây)
+            confirm_frames = 3 if vtype == "danger_zone" else 5
+            if self._person_violation_frames[v_key] >= confirm_frames:
                 if v_key not in self._alerted_persons:
                     logger.info("VIOLATION CONFIRMED: Person #%s -> %s (conf=%.2f)", pid, vtype, conf)
                     self._alerted_persons.add(v_key)
@@ -256,7 +331,7 @@ class CameraManager:
         for pid in visible_pids:
             self._person_last_seen[pid] = now  # Cập nhật last seen cho MỌI người
             pid_violations = current_violations.get(pid, {})
-            for vtype in ["no_helmet", "no_vest", "no_mask"]:
+            for vtype in ["no_helmet", "no_vest", "no_mask", "danger_zone"]:
                 v_key = f"{pid}_{vtype}"
                 if vtype not in pid_violations:
                     # Person này KHÔNG vi phạm loại này → giảm bộ đếm
@@ -300,30 +375,21 @@ class CameraManager:
         except Exception as e:
             logger.error("Failed to save evidence: %s", e)
 
-    def _check_fall(self, falls, annotated_frame, raw_frame):
-        now = time.time()
-        if not falls:
-            if self._fall_in_progress:
-                self._fall_miss_counter += 1
-                if self._fall_miss_counter >= 8:
-                    logger.info("Fall incident resolved/cleared for camera %s", self.camera_id)
-                    self._fall_in_progress = False
-                    self._fall_miss_counter = 0
+    def _check_fall(self, falls, annotated_frame, raw_frame, timestamp=None):
+        if timestamp is None:
+            timestamp = time.time()
+
+        event = self.fall_lifecycle.update(falls or [], timestamp=timestamp)
+        if not event or not event.is_new_alert:
             return
 
-        self._fall_miss_counter = 0
-
-        if self._fall_in_progress:
-            return
-
-        if now - self._last_fall_alert_ts < 10:
-            return
-
-        self._last_fall_alert_ts = now
-        self._fall_in_progress = True
-
-        fall = falls[0]
-        logger.info("FALL DETECTED (New Incident): conf=%.2f label=%s", fall["confidence"], fall["label"])
+        fall = falls[0] if falls else {"confidence": event.confidence, "label": "fall"}
+        logger.info(
+            "FALL CONFIRMED (New Incident): conf=%.2f label=%s (incident_id=%s)",
+            event.confidence,
+            fall.get("label", "fall"),
+            event.incident_id,
+        )
 
         if self.on_fall and self.evidence_folder:
             try:
@@ -331,7 +397,7 @@ class CameraManager:
                 image_path = os.path.join(self.evidence_folder, fname)
                 cv2.imwrite(image_path, annotated_frame)
                 self.on_fall(
-                    confidence=fall["confidence"],
+                    confidence=event.confidence,
                     image_path=image_path,
                     camera_id=self.camera_id,
                 )

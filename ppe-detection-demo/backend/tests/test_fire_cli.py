@@ -121,6 +121,13 @@ def run_cli_test(
 
 
 if __name__ == "__main__":
-    video_in = os.path.join("static", "uploads", "1789781745_chay.mp4")
+    import glob
+    default_vid = None
+    uploads = glob.glob(os.path.join("static", "uploads", "*.mp4"))
+    if uploads:
+        default_vid = uploads[0]
+    
+    video_in = sys.argv[1] if len(sys.argv) > 1 else (default_vid or os.path.join("static", "uploads", "1789961633_chay.mp4"))
     video_out = os.path.join("static", "outputs", "cli_verification_result.mp4")
-    run_cli_test(video_in, video_out, max_frames=300, frame_skip=3)
+    run_cli_test(video_in, video_out, max_frames=120, frame_skip=3)
+

@@ -134,7 +134,7 @@ def merge_sliced_pose_detections(
 class _OneEuroFilter1D:
     """1D One-Euro Filter: Low cutoff at low speeds, high cutoff at high speeds."""
 
-    def __init__(self, te: float = 1.0 / 25.0, min_cutoff: float = 1.2, beta: float = 0.008, d_cutoff: float = 1.0) -> None:
+    def __init__(self, te: float = 1.0 / 25.0, min_cutoff: float = 1.6, beta: float = 0.06, d_cutoff: float = 1.0) -> None:
         self.te = te
         self.min_cutoff = min_cutoff
         self.beta = beta
@@ -173,7 +173,7 @@ class OneEuroPoseFilter:
         - Hỗ trợ lưu vết phục hồi khớp bị che khuất (Occlusion Recovery up to 4 frames).
     """
 
-    def __init__(self, min_cutoff: float = 1.2, beta: float = 0.008, max_occluded_frames: int = 4) -> None:
+    def __init__(self, min_cutoff: float = 1.6, beta: float = 0.06, max_occluded_frames: int = 4) -> None:
         self.min_cutoff = min_cutoff
         self.beta = beta
         self.max_occluded_frames = max_occluded_frames

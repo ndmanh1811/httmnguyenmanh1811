@@ -1,72 +1,206 @@
 import { useState, useEffect } from 'react'
-import { HardHat, Shirt, ShieldAlert, AlertTriangle, Activity, Camera, Flame } from 'lucide-react'
 import api from '../api'
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
-const TYPE_NAMES = {
-  no_helmet: 'Thiếu mũ bảo hiểm',
-  no_vest: 'Thiếu áo bảo hộ',
-  no_mask: 'Thiếu khẩu trang',
-  fall_detected: 'Phát hiện ngã',
-  fire_detected: 'Phát hiện cháy 🔥',
-  smoke_detected: 'Phát hiện khói 💨',
+
+const TYPE_CONFIG = {
+  no_helmet: { label: 'Thiếu mũ bảo hiểm', variant: 'outline', dot: 'bg-amber-400' },
+  no_vest: { label: 'Thiếu áo bảo hộ', variant: 'outline', dot: 'bg-orange-400' },
+  no_mask: { label: 'Thiếu khẩu trang', variant: 'outline', dot: 'bg-purple-400' },
+  fall_detected: { label: 'Phát hiện ngã', variant: 'destructive', dot: 'bg-rose-500' },
+  fire_detected: { label: 'Phát hiện cháy', variant: 'destructive', dot: 'bg-red-500 animate-pulse' },
+  smoke_detected: { label: 'Phát hiện khói', variant: 'destructive', dot: 'bg-amber-500' },
 }
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null)
   const [recent, setRecent] = useState([])
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    api.get('/stats/summary').then(r => setStats(r.data)).catch(() => {})
-    api.get('/stats/recent?limit=5').then(r => setRecent(r.data)).catch(() => {})
+    Promise.all([
+      api.get('/stats/summary').then(r => r.data).catch(() => null),
+      api.get('/stats/recent?limit=8').then(r => r.data).catch(() => []),
+    ]).then(([summaryData, recentData]) => {
+      if (summaryData) setStats(summaryData)
+      if (recentData) setRecent(recentData)
+      setLoading(false)
+    })
   }, [])
 
-  if (!stats) return <div className="text-gray-500">Đang tải...</div>
+  if (loading || !stats) {
+    return (
+      <div className="flex items-center justify-center h-64 text-muted-foreground text-sm">
+        Đang tải dữ liệu tổng quan...
+      </div>
+    )
+  }
 
-  const cards = [
-    { label: 'Tổng vi phạm hôm nay', value: stats.total_today, icon: AlertTriangle, color: 'text-red-400', bg: 'bg-red-500/10' },
-    { label: 'Thiếu mũ bảo hiểm', value: stats.helmet_today, icon: HardHat, color: 'text-orange-400', bg: 'bg-orange-500/10' },
-    { label: 'Thiếu áo bảo hộ', value: stats.vest_today, icon: Shirt, color: 'text-yellow-400', bg: 'bg-yellow-500/10' },
-    { label: 'Thiếu khẩu trang', value: stats.mask_today, icon: ShieldAlert, color: 'text-purple-400', bg: 'bg-purple-500/10' },
-    { label: 'Phát hiện ngã', value: stats.fall_today, icon: Activity, color: 'text-rose-400', bg: 'bg-rose-500/10' },
-    { label: 'Phát hiện cháy', value: stats.fire_today || 0, icon: Flame, color: 'text-red-500 font-bold', bg: 'bg-red-600/20' },
-    { label: 'Phát hiện khói', value: stats.smoke_today || 0, icon: Flame, color: 'text-amber-500 font-bold', bg: 'bg-amber-600/20' },
-    { label: 'Camera hoạt động', value: stats.active_cameras, icon: Camera, color: 'text-sky-400', bg: 'bg-sky-500/10' },
-  ]
+  const ppeTotal = (stats.helmet_today || 0) + (stats.vest_today || 0) + (stats.mask_today || 0)
+  const emergencyTotal = (stats.fall_today || 0) + (stats.fire_today || 0) + (stats.smoke_today || 0)
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Dashboard</h1>
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {cards.map(c => (
-          <div key={c.label} className={`${c.bg} rounded-xl p-4 border border-gray-800`}>
-            <c.icon className={`w-6 h-6 ${c.color} mb-2`} />
-            <p className={`text-2xl font-bold ${c.color}`}>{c.value}</p>
-            <p className="text-xs text-gray-400 mt-1">{c.label}</p>
-          </div>
-        ))}
+      {/* Header */}
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight text-foreground">Tổng quan an toàn</h1>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          Giám sát tuân thủ bảo hộ lao động và phát hiện sự cố nguy hiểm thời gian thực
+        </p>
       </div>
 
-      <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
-        <h2 className="font-semibold mb-3">Sự cố & Vi phạm gần đây</h2>
-        {recent.length === 0 ? (
-          <p className="text-gray-500 text-sm">Chưa có sự cố nào</p>
-        ) : (
-          <div className="space-y-2">
-            {recent.map(v => (
-              <div key={v.id} className="flex items-center justify-between p-3 bg-gray-800/50 rounded-lg">
-                <div>
-                  <span className="text-sm font-medium">{TYPE_NAMES[v.type] || v.type}</span>
-                  <span className="text-xs text-gray-500 ml-2">{v.confidence}%</span>
-                </div>
-                <span className="text-xs text-gray-500">
-                  {new Date(v.timestamp).toLocaleString('vi-VN')}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+      {/* 4 Core Metric Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Total Violations */}
+        <Card className="bg-card border-border shadow-none">
+          <CardHeader className="p-4 pb-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Tổng vi phạm hôm nay
+              </span>
+              <div className="w-2 h-2 rounded-full bg-red-400" />
+            </div>
+          </CardHeader>
+          <CardContent className="p-4 pt-0">
+            <div className="text-3xl font-bold tracking-tight text-foreground tabular-nums">
+              {stats.total_today || 0}
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Bao gồm vi phạm PPE và cảnh báo nguy cơ
+            </p>
+          </CardContent>
+        </Card>
+
+        {/* PPE Violations */}
+        <Card className="bg-card border-border shadow-none">
+          <CardHeader className="p-4 pb-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Vi phạm trang bị PPE
+              </span>
+              <div className="w-2 h-2 rounded-full bg-amber-400" />
+            </div>
+          </CardHeader>
+          <CardContent className="p-4 pt-0">
+            <div className="text-3xl font-bold tracking-tight text-foreground tabular-nums">
+              {ppeTotal}
+            </div>
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-1">
+              <span>Mũ: <strong className="text-foreground">{stats.helmet_today || 0}</strong></span>
+              <span>•</span>
+              <span>Áo: <strong className="text-foreground">{stats.vest_today || 0}</strong></span>
+              <span>•</span>
+              <span>Khẩu trang: <strong className="text-foreground">{stats.mask_today || 0}</strong></span>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Emergency Hazards */}
+        <Card className="bg-card border-border shadow-none">
+          <CardHeader className="p-4 pb-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Sự cố khẩn cấp
+              </span>
+              <div className={`w-2 h-2 rounded-full ${emergencyTotal > 0 ? 'bg-red-500 animate-ping' : 'bg-emerald-400'}`} />
+            </div>
+          </CardHeader>
+          <CardContent className="p-4 pt-0">
+            <div className={`text-3xl font-bold tracking-tight tabular-nums ${emergencyTotal > 0 ? 'text-red-400' : 'text-foreground'}`}>
+              {emergencyTotal}
+            </div>
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-1">
+              <span>Cháy: <strong className="text-foreground">{stats.fire_today || 0}</strong></span>
+              <span>•</span>
+              <span>Khói: <strong className="text-foreground">{stats.smoke_today || 0}</strong></span>
+              <span>•</span>
+              <span>Ngã: <strong className="text-foreground">{stats.fall_today || 0}</strong></span>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Active Cameras */}
+        <Card className="bg-card border-border shadow-none">
+          <CardHeader className="p-4 pb-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Camera kết nối
+              </span>
+              <div className="w-2 h-2 rounded-full bg-emerald-400" />
+            </div>
+          </CardHeader>
+          <CardContent className="p-4 pt-0">
+            <div className="text-3xl font-bold tracking-tight text-foreground tabular-nums">
+              {stats.active_cameras || 0}
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Luồng giám sát trực tuyến ổn định
+            </p>
+          </CardContent>
+        </Card>
       </div>
+
+      {/* Recent Incidents Table */}
+      <Card className="bg-card border-border shadow-none">
+        <CardHeader className="p-4 border-b border-border/50">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm font-semibold text-foreground">
+              Sự cố & Vi phạm gần đây
+            </CardTitle>
+            <span className="text-xs text-muted-foreground">
+              {recent.length} bản ghi mới nhất
+            </span>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {recent.length === 0 ? (
+            <div className="py-12 text-center text-xs text-muted-foreground">
+              Chưa ghi nhận sự cố hoặc vi phạm an toàn nào trong ngày
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow className="border-border/50 hover:bg-transparent">
+                  <TableHead className="w-[180px] text-xs font-medium text-muted-foreground">Thời gian</TableHead>
+                  <TableHead className="text-xs font-medium text-muted-foreground">Loại sự cố</TableHead>
+                  <TableHead className="w-[120px] text-xs font-medium text-muted-foreground text-right">Độ tin cậy</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {recent.map((item) => {
+                  const cfg = TYPE_CONFIG[item.type] || { label: item.type, variant: 'outline', dot: 'bg-zinc-500' }
+                  const time = new Date(item.timestamp).toLocaleString('vi-VN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    day: '2-digit',
+                    month: '2-digit',
+                  })
+                  return (
+                    <TableRow key={item.id} className="border-border/50 hover:bg-muted/40 transition-colors">
+                      <TableCell className="font-mono text-xs text-muted-foreground">
+                        {time}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
+                          <span className="text-xs font-medium text-foreground">
+                            {cfg.label}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-xs tabular-nums text-muted-foreground">
+                        {item.confidence}%
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }

@@ -28,6 +28,7 @@ from enhancements import (
     slice_frame_2x2,
     merge_sliced_pose_detections,
     OneEuroPoseFilter,
+    _calc_box_iou,
 )
 
 class FallLSTM(nn.Module):
@@ -63,7 +64,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 POSE_MODEL_YOLO26 = os.path.join(BASE_DIR, "models_dir", "yolo26s-pose.pt")
 POSE_MODEL_YOLOV8 = os.path.join(BASE_DIR, "models_dir", "yolov8s-pose.pt")
 
-KPT_CONF_THRESH = 0.45
+KPT_CONF_THRESH = 0.25  # Tu 0.45 -> 0.25 giup hien thi ro net cac khop tren webcam goc gan
 TORSO_AR_FALL_THRESH = 1.5
 
 # BB Dynamics thresholds (Path A) — thắt chặt để tránh false positive
@@ -108,7 +109,7 @@ class PoseFallDetector:
         self.required_consecutive_frames = required_consecutive_frames
 
         self._smoothing_factor: float = 0.75
-        self._max_match_dist: float = 150.0
+        self._max_match_dist: float = 250.0
 
         # Ưu tiên YOLO26s-Pose (NMS-Free, 63.0 mAP) -> YOLOv8s-Pose -> Tự động tải yolo26s-pose.pt
         if os.path.isfile(POSE_MODEL_YOLO26):
@@ -127,6 +128,8 @@ class PoseFallDetector:
 
         self._last_detected_persons: list[dict] = []
         self._prev_persons: list[dict] = []
+        self._cached_detected_persons: list[dict] = []
+        self._last_detected_time: float = 0.0
 
         self._bb_history: dict[int, deque] = {}
         self._cy_history: dict[int, deque] = {}
@@ -162,6 +165,8 @@ class PoseFallDetector:
         """Reset toàn bộ trạng thái tracking và phát hiện ngã khi bắt đầu video mới."""
         self._last_detected_persons.clear()
         self._prev_persons.clear()
+        self._cached_detected_persons.clear()
+        self._last_detected_time = 0.0
         self._bb_history.clear()
         self._cy_history.clear()
         self._fall_frames.clear()
@@ -186,11 +191,35 @@ class PoseFallDetector:
             return matched
 
         used_prev: set[int] = set()
+
+        # Giai đoạn 1: IoU Matching (chính xác tuyệt đối khi bounding box giao nhau)
         for new_i, bbox in enumerate(new_bboxes):
+            best_iou = 0.20
+            best_j = None
+            for j, prev in enumerate(self._prev_persons):
+                if j in used_prev:
+                    continue
+                iou = _calc_box_iou(bbox, prev["bbox"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_j = j
+            if best_j is not None:
+                matched[new_i] = best_j
+                used_prev.add(best_j)
+
+        # Giai đoạn 2: Khoảng cách tâm thích ứng (Adaptive Center Distance) cho trường hợp vận động nhanh / rơi ngã
+        for new_i, bbox in enumerate(new_bboxes):
+            if matched[new_i] is not None:
+                continue
             ncx = (bbox[0] + bbox[2]) / 2.0
             ncy = (bbox[1] + bbox[3]) / 2.0
-            best_dist = self._max_match_dist
-            best_j: int | None = None
+            bw = max(bbox[2] - bbox[0], 1)
+            bh = max(bbox[3] - bbox[1], 1)
+            diag = math.hypot(bw, bh)
+            adaptive_max_dist = max(self._max_match_dist, 1.8 * diag)
+
+            best_dist = adaptive_max_dist
+            best_j = None
             for j, prev in enumerate(self._prev_persons):
                 if j in used_prev:
                     continue
@@ -201,9 +230,10 @@ class PoseFallDetector:
                 if d < best_dist:
                     best_dist = d
                     best_j = j
-            matched[new_i] = best_j
             if best_j is not None:
+                matched[new_i] = best_j
                 used_prev.add(best_j)
+
         return matched
 
     # ------------------------------------------------------------------
@@ -328,7 +358,7 @@ class PoseFallDetector:
         Xac minh cau truc giai phau nguoi thuc te (Human Skeleton Integrity Gate).
         Loai bo triet de cac diem khop ao giac sinh ra ben trong dam khoi, hoi nuoc, lua hoac do vat.
         """
-        min_kpt_conf = 0.40 if is_in_smoke else 0.30
+        min_kpt_conf = 0.35 if is_in_smoke else 0.20
         valid_kpts = [k for k in kpts if k[2] >= min_kpt_conf]
         num_valid = len(valid_kpts)
 
@@ -339,30 +369,29 @@ class PoseFallDetector:
         # 1. Khung than tren / That lung (Torso Core: Shoulders 5,6 va Hips 11,12)
         has_shoulder = (kpts[5][2] >= min_kpt_conf or kpts[6][2] >= min_kpt_conf)
         l_hip, r_hip = kpts[11][2], kpts[12][2]
-        has_hip = (l_hip >= 0.28 or r_hip >= 0.28)
+        has_hip = (l_hip >= min_kpt_conf or r_hip >= min_kpt_conf)
 
         # 2. Khung than duoi (Lower body: Hips hoac Knees)
-        # Ao giac do khoi bop meo chi tao ra dau/vai ao, KHONG BAO GIO co ca hong va chan
         l_knee, r_knee = kpts[13][2], kpts[14][2]
-        has_lower_body = has_hip or (l_knee >= 0.28 or r_knee >= 0.28)
-        if not has_lower_body:
+        has_lower_body = has_hip or (l_knee >= min_kpt_conf or r_knee >= min_kpt_conf)
+        if is_in_smoke and not has_lower_body:
             return False, "Missing lower body (smoke phantom has no hips/legs)"
 
-        if not (has_shoulder and has_hip):
+        if is_in_smoke and not (has_shoulder and has_hip):
             if num_valid < 7:
                 return False, "Missing human torso core (shoulders or hips missing)"
 
         # 3. Kiem tra do sac net ket cau bien (Laplacian Edge Variance)
-        # Dam khoi, vung toi mo ao co variance < 30.0, nguoi that luon co vien sac net
-        if frame is not None and frame.size > 0:
+        # Chi ap dung kiem tra do mo giong khoi khi dang nam trong vung khoi
+        if is_in_smoke and frame is not None and getattr(frame, "size", 0) > 0:
             x1, y1, x2, y2 = bbox
             h_f, w_f = frame.shape[:2]
             crop = frame[max(0, y1):min(h_f, y2), max(0, x1):min(w_f, x2)]
             if crop.size > 100:
                 gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                 lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-                if lap_var < 30.0:
-                    return False, f"Blurry texture like smoke (Laplacian={lap_var:.1f} < 30)"
+                if lap_var < 20.0:
+                    return False, f"Blurry texture like smoke (Laplacian={lap_var:.1f} < 20)"
 
         # 4. Do bao phu khong gian giai phau (Anatomical span)
         x1, y1, x2, y2 = bbox
@@ -373,7 +402,7 @@ class PoseFallDetector:
         kpt_w = max(xs) - min(xs)
         kpt_h = max(ys) - min(ys)
 
-        if (kpt_w / bw < 0.18) and (kpt_h / bh < 0.18):
+        if (kpt_w / bw < 0.12) and (kpt_h / bh < 0.12):
             return False, "Keypoints tightly clustered (phantom noise)"
 
         return True, "Valid skeleton"
@@ -738,10 +767,12 @@ class PoseFallDetector:
         frame: Any,
         smoke_boxes: list | None = None,
         imgsz: int | None = None,
-        use_clahe: bool = True,
+        use_clahe: bool = False,
         use_sahi: bool = False,
+        timestamp: float | None = None,
     ) -> list[dict]:
         proc_frame = apply_adaptive_clahe(frame) if (use_clahe and frame is not None and getattr(frame, "size", 0) > 0) else frame
+        curr_time = time.time() if timestamp is None else timestamp
 
         predict_kwargs: dict[str, Any] = {"conf": self.conf, "verbose": False}
         if imgsz is not None:
@@ -770,8 +801,21 @@ class PoseFallDetector:
             )
 
         if not global_bboxes:
-            self._prev_persons = []
-            self._cleanup_stale(set())
+            # Tăng lost_count cho các prev_persons hiện tại (duy trì bộ nhớ tối đa 6 frames ~0.25s)
+            surviving_prev: list[dict] = []
+            active_pids: set[int] = set()
+            for p in self._prev_persons:
+                lost = p.get("lost_count", 0) + 1
+                if lost <= 6:
+                    p_copy = dict(p)
+                    p_copy["lost_count"] = lost
+                    surviving_prev.append(p_copy)
+                    active_pids.add(p["pid"])
+            self._prev_persons = surviving_prev
+            self._cleanup_stale(active_pids)
+            self._last_detected_persons = []
+            if not falls:
+                self._is_fall_confirmed = False
             return falls
 
         matched_prev = self._match_to_prev(global_bboxes)
@@ -901,13 +945,16 @@ class PoseFallDetector:
             fall_count = self._fall_frames[pid]
             is_verified_fall = False
             immobile_count = 0
+            fall_duration = 0.0
 
             if is_upright:
                 status = "normal"
                 self._fall_latch[pid] = 0
+                self._fall_candidates.pop(pid, None)
             elif is_standing_bend:
                 status = "bending"
                 self._fall_latch[pid] = 0
+                self._fall_candidates.pop(pid, None)
             elif fall_count >= self.required_consecutive_frames:
                 # Đã phát hiện dáng ngã! Kích hoạt quy trình kiểm tra bất động (Post-fall Inactivity)
                 # Bắt buộc phải có yếu tố tiếp đất hoặc rơi mạnh mới kiểm tra bất động nằm sàn
@@ -919,7 +966,7 @@ class PoseFallDetector:
                             "immobile_frames": 1,
                             "last_cx": cx,
                             "last_cy": cy,
-                            "start_time": time.time(),
+                            "start_time": curr_time,
                         }
                         immobile_count = 1
                     else:
@@ -933,23 +980,40 @@ class PoseFallDetector:
                         cand["last_cy"] = cy
                         immobile_count = cand["immobile_frames"]
 
-                    if immobile_count >= self.inactivity_frames_required:
+                    cand = self._fall_candidates[pid]
+                    fall_duration = max(0.0, curr_time - cand.get("start_time", curr_time))
+                    is_immobile_5s = (fall_duration >= 5.0) or (immobile_count >= 120)
+
+                    if is_immobile_5s:
+                        status = "fall_immobile"
+                        is_verified_fall = True
+                        self._fall_latch[pid] = 40
+                    elif immobile_count >= self.inactivity_frames_required:
                         status = "fall"
                         is_verified_fall = True
-                        self._fall_latch[pid] = 25  # Giữ đỏ ít nhất 25 frames (~1-1.5s) để mắt thường thấy rõ
+                        self._fall_latch[pid] = 25
                     else:
-                        status = "fall_candidate"
+                        status = "fall"
                 else:
                     status = "bending" if (pose_score > 0.25 or bb_score > 0.2 or (torso_angle is not None and torso_angle >= 35.0)) else "normal"
             else:
                 if fall_count == 0:
                     self._fall_candidates.pop(pid, None)
 
-                # Giữ trạng thái fall đỏ nếu vừa mới ngã và chưa đứng dậy
+                cand = self._fall_candidates.get(pid)
+                if cand:
+                    fall_duration = max(0.0, curr_time - cand.get("start_time", curr_time))
+                    immobile_count = cand.get("immobile_frames", 0)
+                else:
+                    fall_duration = 0.0
+                    immobile_count = 0
+                is_immobile_5s = (fall_duration >= 5.0) or (immobile_count >= 120)
+
+                # Giữ trạng thái fall đỏ hoặc đen nếu vừa mới ngã và chưa đứng dậy
                 latch_remain = self._fall_latch.get(pid, 0)
                 if latch_remain > 0 and not is_upright:
                     self._fall_latch[pid] = latch_remain - 1
-                    status = "fall"
+                    status = "fall_immobile" if is_immobile_5s else "fall"
                     is_verified_fall = True
                 elif pose_score > 0.3 or bb_score > 0.2 or (torso_angle is not None and torso_angle >= 35.0):
                     status = "bending"
@@ -964,6 +1028,7 @@ class PoseFallDetector:
                 "status": status,
                 "fall_frames": fall_count,
                 "immobile_frames": immobile_count,
+                "fall_duration": round(fall_duration, 1),
                 "keypoints": kpts,
                 "bb_score": bb_score,
                 "pose_score": pose_score,
@@ -977,18 +1042,21 @@ class PoseFallDetector:
                 "bbox": [x1, y1, x2, y2],
                 "kpts": kpts,
                 "pid": pid,
+                "lost_count": 0,
             })
 
             if is_verified_fall:
                 self._is_fall_confirmed = True
-                self._last_fall_time = time.time()
+                self._last_fall_time = curr_time
                 falls.append({
-                    "label": "Fall-Immobile",
+                    "label": "Fall-Immobile (>5s)" if status == "fall_immobile" else "Fall-Detected",
                     "confidence": fall_conf if fall_conf > 0 else conf,
                     "bbox": [x1, y1, x2, y2],
                     "angle": angle_val,
                     "pid": pid,
                     "immobile_frames": immobile_count,
+                    "fall_duration": round(fall_duration, 1),
+                    "status": status,
                     "keypoints": kpts,
                     "paths": {
                         "bb": round(bb_score, 2),
@@ -999,6 +1067,17 @@ class PoseFallDetector:
                         "lstm": round(lstm_fall_score, 2),
                     },
                 })
+
+        # Giữ lại các track trước đó bị mất dấu tạm thời (tối đa 6 frames ~0.25s)
+        matched_prev_indices = {idx for idx in matched_prev if idx is not None}
+        for j, prev in enumerate(self._prev_persons):
+            if j not in matched_prev_indices:
+                lost = prev.get("lost_count", 0) + 1
+                if lost <= 6:
+                    prev_copy = dict(prev)
+                    prev_copy["lost_count"] = lost
+                    new_prev_persons.append(prev_copy)
+                    active_pids.add(prev["pid"])
 
         self._prev_persons = new_prev_persons
 
@@ -1013,75 +1092,126 @@ class PoseFallDetector:
     # Ve annotation
     # ------------------------------------------------------------------
 
-    def annotate_frame(self, frame: Any, falls: list[dict]) -> Any:
+    @property
+    def last_detected_persons(self) -> list[dict]:
+        """Danh sach tat ca nguoi da duoc xac thuc khung xuong trong frame gan nhat."""
+        return self._last_detected_persons
+
+    def annotate_frame(self, frame: Any, falls: list[dict], timestamp: float | None = None) -> Any:
         fall_bboxes = {tuple(f["bbox"]) for f in falls}
 
-        for person in self._last_detected_persons:
+        # Visual persistence: chỉ dùng trong khoảng cực ngắn (~0.08s, tối đa 2 frame off-slot của FixedSlotScheduler)
+        # Tuyệt đối không lưu vết 3.0s gây đứng hình / đóng băng khung xương
+        persons_to_draw = self._last_detected_persons
+        now = time.time() if timestamp is None else timestamp
+        if not persons_to_draw:
+            if (now - getattr(self, "_last_detected_time", 0.0) < 0.08):
+                persons_to_draw = getattr(self, "_cached_detected_persons", [])
+            else:
+                self._cached_detected_persons = []
+        else:
+            self._cached_detected_persons = list(persons_to_draw)
+            self._last_detected_time = now
+
+        frame_h = frame.shape[0] if hasattr(frame, "shape") else 720
+
+        for person in persons_to_draw:
             status = person["status"]
             kpts = person["keypoints"]
             angle = person["angle"]
             x1, y1, x2, y2 = person["bbox"]
-            fall_frames = person.get("fall_frames", 0)
             pid = person.get("pid", 0)
-            bb_s = person.get("bb_score", 0)
-            pose_s = person.get("pose_score", 0)
-            motion_s = person.get("motion_score", 0)
+            fall_dur = person.get("fall_duration", 0.0)
 
-            if status == "fall":
+            is_immobile = (status == "fall_immobile") or (status == "fall" and fall_dur >= 5.0)
+
+            if is_immobile:
+                # 4. Ngã bất động quá 5s -> MÀU ĐEN (Black)
+                bone_color = (0, 0, 0)
+                joint_color = (0, 0, 0)
+                core_color = (255, 255, 255)
+                has_white_halo = True
+                status_text = f"NGA BAT DONG (>5s) [{fall_dur:.1f}s] P#{pid}"
+            elif status in ("fall", "fall_candidate"):
+                # 3. Tư thế ngã (< 5s) -> MÀU ĐỎ (Red)
                 bone_color = (0, 0, 255)
-                joint_color = (0, 0, 255)
-                angle_str = f" ({angle:.0f}deg)" if angle > 0 else ""
-                status_text = f"CAP CUU: NGA BAT DONG!{angle_str} P#{pid}"
-            elif status == "fall_candidate":
-                bone_color = (0, 165, 255)
-                joint_color = (0, 215, 255)
-                immobile_f = person.get("immobile_frames", 1)
-                angle_str = f" ({angle:.0f}deg)" if angle > 0 else ""
-                status_text = f"Theo doi bat dong... [{immobile_f}/{self.inactivity_frames_required}] P#{pid}"
+                joint_color = (50, 50, 255)
+                core_color = (255, 255, 255)
+                has_white_halo = False
+                dur_str = f" [{fall_dur:.1f}s]" if fall_dur > 0 else ""
+                status_text = f"NGA!{dur_str} P#{pid}"
             elif status == "bending":
-                bone_color = (0, 220, 255)
-                joint_color = (0, 255, 255)
-                status_text = f"Cui ({angle:.0f}deg) P#{pid}"
+                # 2. Tư thế cúi nghiêng -> MÀU CAM (Orange)
+                bone_color = (0, 140, 255)
+                joint_color = (30, 165, 255)
+                core_color = (255, 255, 255)
+                has_white_halo = False
+                status_text = f"Cui nghieng ({angle:.0f}deg) P#{pid}"
             else:
-                bone_color = (0, 220, 0)
-                joint_color = (0, 255, 0)
-                status_text = f"{angle:.0f}deg P#{pid}" if angle > 0 else f"OK P#{pid}"
+                # 1. Tư thế bình thường -> MÀU VÀNG (Yellow)
+                bone_color = (0, 220, 255)
+                joint_color = (0, 240, 255)
+                core_color = (255, 255, 255)
+                has_white_halo = False
+                status_text = f"P#{pid}"
 
-            if status == "fall_candidate":
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
-
+            # Ve duong xuong (Bones)
             for p1_idx, p2_idx in SKELETON_PAIRS:
                 p1 = kpts[p1_idx]
                 p2 = kpts[p2_idx]
                 if p1[2] >= KPT_CONF_THRESH and p2[2] >= KPT_CONF_THRESH:
-                    cv2.line(
-                        frame,
-                        (int(p1[0]), int(p1[1])),
-                        (int(p2[0]), int(p2[1])),
-                        bone_color, 2, cv2.LINE_AA,
-                    )
+                    pt1 = (int(p1[0]), int(p1[1]))
+                    pt2 = (int(p2[0]), int(p2[1]))
+                    if has_white_halo:
+                        # Halo trang 4px de xuong den noi bat tuyet doi tren quan ao/nen toi mau
+                        cv2.line(frame, pt1, pt2, (255, 255, 255), 4, cv2.LINE_AA)
+                    cv2.line(frame, pt1, pt2, bone_color, 2, cv2.LINE_AA)
 
+            # Ve cac khop (Joints)
             for pt in kpts:
                 if pt[2] >= KPT_CONF_THRESH:
                     px, py = int(pt[0]), int(pt[1])
-                    cv2.circle(frame, (px, py), 4, joint_color, -1, cv2.LINE_AA)
-                    cv2.circle(frame, (px, py), 5, (255, 255, 255), 1, cv2.LINE_AA)
+                    if has_white_halo:
+                        # Halo trang cho khop den
+                        cv2.circle(frame, (px, py), 4, (255, 255, 255), -1, cv2.LINE_AA)
+                        cv2.circle(frame, (px, py), 3, (0, 0, 0), -1, cv2.LINE_AA)
+                        cv2.circle(frame, (px, py), 1, (255, 255, 255), -1, cv2.LINE_AA)
+                    else:
+                        cv2.circle(frame, (px, py), 3, joint_color, -1, cv2.LINE_AA)
+                        cv2.circle(frame, (px, py), 1, core_color, -1, cv2.LINE_AA)
 
-            cv2.putText(
-                frame, status_text,
-                (x1, max(y2 + 18, 20)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, bone_color, 2, cv2.LINE_AA,
-            )
-
-            v_s = person.get("kpt_vel_score", 0.0)
-            g_s = person.get("ground_score", 0.0)
-            l_s = person.get("lstm_score", 0.0)
-            if bb_s > 0.1 or pose_s > 0.1 or motion_s > 0.1 or v_s > 0.1 or g_s > 0.1:
-                score_text = f"P:{pose_s:.1f} G:{g_s:.1f} V:{v_s:.1f} M:{motion_s:.1f} L:{l_s:.1f}"
+            # Hien thi badge trang thai
+            if is_immobile:
+                (tw, th), _ = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
+                tag_y = max(min(y2 + th + 8, frame_h - 8), 18)
+                cv2.rectangle(frame, (x1, tag_y - th - 4), (x1 + tw + 8, tag_y + 4), (0, 0, 0), -1)
+                cv2.rectangle(frame, (x1, tag_y - th - 4), (x1 + tw + 8, tag_y + 4), (255, 255, 255), 1)
                 cv2.putText(
-                    frame, score_text,
-                    (x1, max(y2 + 36, 38)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1, cv2.LINE_AA,
+                    frame, status_text,
+                    (x1 + 4, tag_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA,
+                )
+            elif status != "normal":
+                (tw, th), _ = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
+                tag_y = max(min(y2 + th + 8, frame_h - 8), 18)
+                cv2.rectangle(frame, (x1, tag_y - th - 4), (x1 + tw + 8, tag_y + 4), (20, 20, 20), -1)
+                cv2.rectangle(frame, (x1, tag_y - th - 4), (x1 + tw + 8, tag_y + 4), bone_color, 1)
+                cv2.putText(
+                    frame, status_text,
+                    (x1 + 4, tag_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA,
+                )
+            else:
+                # Dang binh thuong (Vang): badge gon gang o goc tren
+                mini_tag = f"P#{pid}"
+                (tw, th), _ = cv2.getTextSize(mini_tag, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
+                tag_y = max(y1 - 6, th + 4)
+                cv2.rectangle(frame, (x1, tag_y - th - 3), (x1 + tw + 6, tag_y + 3), (20, 20, 20), -1)
+                cv2.rectangle(frame, (x1, tag_y - th - 3), (x1 + tw + 6, tag_y + 3), bone_color, 1)
+                cv2.putText(
+                    frame, mini_tag,
+                    (x1 + 3, tag_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA,
                 )
 
         for f in falls:
@@ -1089,27 +1219,60 @@ class PoseFallDetector:
             conf = f["confidence"]
             angle = f.get("angle", 0.0)
             paths = f.get("paths", {})
+            f_status = f.get("status", "fall")
+            f_dur = f.get("fall_duration", 0.0)
             angle_str = f" ({angle:.0f}deg)" if angle > 0 else ""
-            label = f"CAP CUU: NGA BAT DONG! {conf:.2f}{angle_str}"
-            path_label = f"Pose:{paths.get('pose', 0)} Grd:{paths.get('grd', 0)} Vel:{paths.get('vel', 0)} Mot:{paths.get('motion', 0)}"
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
-            cv2.rectangle(
-                frame,
-                (x1, max(y1 - th - 24, 0)),
-                (x1 + tw + 6, y1),
-                (0, 0, 255), -1,
-            )
-            cv2.putText(
-                frame, label,
-                (x1 + 3, max(y1 - 18, 12)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame, path_label,
-                (x1 + 3, max(y1 - 4, 10)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA,
-            )
+            if f_status == "fall_immobile" or f_dur >= 5.0:
+                label = f"CAP CUU: NGA BAT DONG (>5s)! {conf:.2f}{angle_str}"
+                path_label = f"Pose:{paths.get('pose', 0)} Grd:{paths.get('grd', 0)} Vel:{paths.get('vel', 0)} Mot:{paths.get('motion', 0)}"
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 4)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), 2)
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+                cv2.rectangle(
+                    frame,
+                    (x1, max(y1 - th - 24, 0)),
+                    (x1 + tw + 8, y1),
+                    (0, 0, 0), -1,
+                )
+                cv2.rectangle(
+                    frame,
+                    (x1, max(y1 - th - 24, 0)),
+                    (x1 + tw + 8, y1),
+                    (255, 255, 255), 2,
+                )
+                cv2.putText(
+                    frame, label,
+                    (x1 + 4, max(y1 - 18, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    frame, path_label,
+                    (x1 + 4, max(y1 - 4, 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA,
+                )
+            else:
+                label = f"CANH BAO: NGA! {conf:.2f}{angle_str}"
+                path_label = f"Pose:{paths.get('pose', 0)} Grd:{paths.get('grd', 0)} Vel:{paths.get('vel', 0)} Mot:{paths.get('motion', 0)}"
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+                cv2.rectangle(
+                    frame,
+                    (x1, max(y1 - th - 24, 0)),
+                    (x1 + tw + 6, y1),
+                    (0, 0, 255), -1,
+                )
+                cv2.putText(
+                    frame, label,
+                    (x1 + 3, max(y1 - 18, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    frame, path_label,
+                    (x1 + 3, max(y1 - 4, 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1, cv2.LINE_AA,
+                )
 
         return frame

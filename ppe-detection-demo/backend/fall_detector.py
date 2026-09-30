@@ -37,9 +37,9 @@ class FallDetector:
         """Phat hien nga dong hoc dua tren goc than minh va thoi gian bat dong."""
         return self._impl.detect(frame, smoke_boxes=smoke_boxes, imgsz=imgsz, **kwargs)
 
-    def annotate_frame(self, frame: Any, falls: list[dict]) -> Any:
+    def annotate_frame(self, frame: Any, falls: list[dict], timestamp: float | None = None, **kwargs) -> Any:
         """Ve khung xuong va thong bao tai nan nga len khung hinh."""
-        return self._impl.annotate_frame(frame, falls)
+        return self._impl.annotate_frame(frame, falls, timestamp=timestamp, **kwargs)
 
     @property
     def last_detected_persons(self) -> list[dict]:

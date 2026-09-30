@@ -23,12 +23,35 @@ from typing import Any, Callable
 
 import cv2
 import imageio
+import numpy as np
+import supervision as sv
 from huggingface_hub import hf_hub_download
 from ultralytics import YOLO
 
 from enhancements import apply_adaptive_clahe
 
 logger = logging.getLogger(__name__)
+
+
+def check_workers_in_polygon_zone(worker_bboxes: list[list[int]], polygon_points: list[list[int]]) -> list[bool]:
+    """
+    Kiem tra chan cong nhan (BOTTOM_CENTER) co nam trong polygon vung nguy hiem hay khong
+    su dung supervision.PolygonZone theo muc 7 trong ai_architecture_plan.md.
+    """
+    if not worker_bboxes or len(polygon_points) < 3:
+        return [False] * len(worker_bboxes)
+
+    try:
+        poly = np.array(polygon_points, dtype=np.int32)
+        zone = sv.PolygonZone(polygon=poly, triggering_anchors=[sv.Position.BOTTOM_CENTER])
+        xyxy = np.array(worker_bboxes, dtype=np.float32)
+        detections = sv.Detections(xyxy=xyxy)
+        matches = zone.trigger(detections=detections)
+        return [bool(m) for m in matches]
+    except Exception as e:
+        logger.warning("PolygonZone check error: %s", e)
+        return [False] * len(worker_bboxes)
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_WEIGHTS = os.path.join(BASE_DIR, "models_dir", "best_hardhat.pt")
@@ -134,6 +157,35 @@ class PPEDetector:
         self.iou = iou
         self.ppe_memory_duration: float = 6.0  # seconds to remember verified PPE status during fast motion/occlusion
         self._ppe_memory: dict[int, dict[str, dict]] = {}
+        self.last_detected_persons: list[dict] = []
+        self.last_person_boxes: list[list[int]] = []
+        self._sahi_model = None
+        self._last_rendered_persons: list[dict] = []
+        self._last_rendered_ppe_items: list[dict] = []
+        self._last_rendered_violations: list[dict] = []
+        self._last_rendered_all_pids: list[int] = []
+        self._last_rendered_stats: dict[str, dict[str, int]] = {
+            "helmet": {"ok": 0, "violation": 0},
+            "vest": {"ok": 0, "violation": 0},
+            "mask": {"ok": 0, "violation": 0},
+        }
+        self._last_ppe_inference_time: float = 0.0
+
+    def reset(self) -> None:
+        """Reset toan bo bo nho theo doi nguoi, PPE va visual persistence cache."""
+        self._ppe_memory.clear()
+        self._last_rendered_persons = []
+        self._last_rendered_ppe_items = []
+        self._last_rendered_violations = []
+        self._last_rendered_all_pids = []
+        self._last_rendered_stats = {
+            "helmet": {"ok": 0, "violation": 0},
+            "vest": {"ok": 0, "violation": 0},
+            "mask": {"ok": 0, "violation": 0},
+        }
+        self._last_ppe_inference_time = 0.0
+        self.last_detected_persons = []
+        self.last_person_boxes = []
 
     # ---------- Xu ly video upload ----------
 
@@ -149,7 +201,7 @@ class PPEDetector:
         on_progress: Callable[[int, int, float], None] | None = None,
         cancel_event: threading.Event | None = None,
         imgsz: int = 960,
-        use_clahe: bool = True,
+        use_clahe: bool = False,
         use_sahi: bool = False,
     ) -> dict[str, int]:
         """Doc video, chay detection, ghi video ket qua, tra ve thong ke."""
@@ -180,9 +232,11 @@ class PPEDetector:
             macro_block_size=None,
         )
 
-        self._ppe_memory.clear()
+        self.reset()
         if fall_detector and hasattr(fall_detector, "reset"):
             fall_detector.reset()
+        if fire_detector and hasattr(fire_detector, "reset"):
+            fire_detector.reset()
         stats = {
             "total_frames": 0,
             "processed_frames": 0,
@@ -259,9 +313,11 @@ class PPEDetector:
         timestamp: float | None = None,
         enable_ppe: bool = True,
         enable_fall: bool = True,
+        run_ppe_inference: bool | None = None,
         imgsz: int = 640,
-        use_clahe: bool = True,
+        use_clahe: bool = False,
         use_sahi: bool = False,
+        exclusion_zones: list[dict] | None = None,
     ) -> tuple[Any, bool, dict, list, list, list, list]:
         """Chay detection va ByteTrack tren 1 frame, lien ket Nguoi - PPE, ve annotation thong minh."""
         ppe_stats: dict[str, dict[str, int]] = {
@@ -293,71 +349,146 @@ class PPEDetector:
         falls = []
         verified_pose_persons = []
         if fall_detector is not None:
-            detected_falls = fall_detector.detect(
-                frame,
-                smoke_boxes=smoke_boxes,
-                imgsz=imgsz,
-                use_clahe=use_clahe,
-                use_sahi=use_sahi,
-            )
-            verified_pose_persons = getattr(fall_detector, "last_detected_persons", [])
             if enable_fall:
+                try:
+                    detected_falls = fall_detector.detect(
+                        frame,
+                        smoke_boxes=smoke_boxes,
+                        imgsz=imgsz,
+                        use_clahe=use_clahe,
+                        use_sahi=use_sahi,
+                        timestamp=now,
+                    )
+                except TypeError:
+                    detected_falls = fall_detector.detect(
+                        frame,
+                        smoke_boxes=smoke_boxes,
+                        imgsz=imgsz,
+                        use_clahe=use_clahe,
+                        use_sahi=use_sahi,
+                    )
                 falls = detected_falls
+            verified_pose_persons = getattr(fall_detector, "last_detected_persons", [])
 
         # 3. PPE DETECTION (Stage 1: Xac thuc nguoi; Stage 2: Danh gia PPE gan voi nguoi)
-        if enable_ppe:
+        should_run_ppe = enable_ppe and (run_ppe_inference is None or run_ppe_inference)
+        if should_run_ppe:
             ppe_frame = apply_adaptive_clahe(frame) if (use_clahe and frame is not None and getattr(frame, "size", 0) > 0) else frame
-            track_kwargs: dict[str, Any] = {
-                "conf": self.conf,
-                "iou": self.iou,
-                "imgsz": imgsz,
-                "verbose": False,
-            }
-            try:
-                results = self.model.track(ppe_frame, persist=True, tracker="bytetrack.yaml", **track_kwargs)
-            except Exception:
-                results = self.model.predict(ppe_frame, conf=self.conf, iou=self.iou, imgsz=imgsz, verbose=False)
-
-            r = results[0]
-            boxes = r.boxes
-            names = r.names
-
             candidate_persons = []
             candidate_ppe = []
 
-            for i, box in enumerate(boxes):
-                cls_id = int(box.cls[0])
-                label = names.get(cls_id, str(cls_id))
-                low_label = label.lower().strip()
-                conf_score = float(box.conf[0])
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
+            # Che do SAHI (Slicing Aided Hyper Inference) - doc quyen cho Offline Video Upload
+            if use_sahi:
+                if self._sahi_model is None:
+                    try:
+                        import torch
+                        from sahi import AutoDetectionModel
+                        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                        self._sahi_model = AutoDetectionModel.from_pretrained(
+                            model_type="yolov8",
+                            model=self.model,
+                            confidence_threshold=self.conf,
+                            device=device,
+                        )
+                        logger.info("SAHI AutoDetectionModel initialized on %s for offline upload", device)
+                    except Exception as e:
+                        logger.warning("Failed to initialize SAHI model: %s", e)
+                        self._sahi_model = False
 
-                if low_label in ("person", "worker", "people"):
-                    track_id = int(box.id[0]) if (hasattr(box, "id") and box.id is not None) else (i + 1)
-                    candidate_persons.append({
-                        "id": track_id,
-                        "bbox": [x1, y1, x2, y2],
-                        "conf": conf_score,
-                    })
-                else:
-                    ppe_res = _classify_label(label)
-                    if ppe_res is not None:
-                        # Bo qua ppe ao giac nam trong vung khoi neu conf thap
-                        in_hazard = _is_in_smoke_or_fire([x1, y1, x2, y2], hazard_boxes, threshold=0.35)
-                        if in_hazard and conf_score < 0.60:
-                            continue
+                if self._sahi_model:
+                    try:
+                        from sahi.predict import get_sliced_prediction
+                        sahi_res = get_sliced_prediction(
+                            ppe_frame,
+                            self._sahi_model,
+                            slice_height=512,
+                            slice_width=512,
+                            overlap_height_ratio=0.2,
+                            overlap_width_ratio=0.2,
+                            verbose=0,
+                        )
+                        for i, obj in enumerate(sahi_res.object_prediction_list):
+                            label = obj.category.name
+                            low_label = label.lower().strip()
+                            conf_score = float(obj.score.value)
+                            x1, y1, x2, y2 = map(int, obj.bbox.to_xyxy())
 
-                        ppe_type, status = ppe_res
-                        cx = (x1 + x2) / 2.0
-                        cy = (y1 + y2) / 2.0
-                        candidate_ppe.append({
-                            "type": ppe_type,
-                            "status": status,
-                            "conf": conf_score,
-                            "label": label,
+                            if low_label in ("person", "worker", "people"):
+                                candidate_persons.append({
+                                    "id": i + 1,
+                                    "bbox": [x1, y1, x2, y2],
+                                    "conf": conf_score,
+                                })
+                            else:
+                                ppe_res = _classify_label(label)
+                                if ppe_res is not None:
+                                    in_hazard = _is_in_smoke_or_fire([x1, y1, x2, y2], hazard_boxes, threshold=0.35)
+                                    if in_hazard and conf_score < 0.60:
+                                        continue
+                                    ppe_type, status = ppe_res
+                                    cx = (x1 + x2) / 2.0
+                                    cy = (y1 + y2) / 2.0
+                                    candidate_ppe.append({
+                                        "type": ppe_type,
+                                        "status": status,
+                                        "conf": conf_score,
+                                        "label": label,
+                                        "bbox": [x1, y1, x2, y2],
+                                        "center": (cx, cy),
+                                    })
+                    except Exception as e:
+                        logger.warning("SAHI prediction failed, fallback to standard track: %s", e)
+
+            # Standard ByteTrack inference (Realtime Camera Stream hoac khi use_sahi=False)
+            if not candidate_persons and not candidate_ppe and not (use_sahi and getattr(self, "_sahi_model", None)):
+                track_kwargs: dict[str, Any] = {
+                    "conf": self.conf,
+                    "iou": self.iou,
+                    "imgsz": imgsz,
+                    "verbose": False,
+                }
+                try:
+                    results = self.model.track(ppe_frame, persist=True, tracker="bytetrack.yaml", **track_kwargs)
+                except Exception:
+                    results = self.model.predict(ppe_frame, conf=self.conf, iou=self.iou, imgsz=imgsz, verbose=False)
+
+                r = results[0]
+                boxes = r.boxes
+                names = r.names
+
+                for i, box in enumerate(boxes):
+                    cls_id = int(box.cls[0])
+                    label = names.get(cls_id, str(cls_id))
+                    low_label = label.lower().strip()
+                    conf_score = float(box.conf[0])
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                    if low_label in ("person", "worker", "people"):
+                        track_id = int(box.id[0]) if (hasattr(box, "id") and box.id is not None) else (i + 1)
+                        candidate_persons.append({
+                            "id": track_id,
                             "bbox": [x1, y1, x2, y2],
-                            "center": (cx, cy),
+                            "conf": conf_score,
                         })
+                    else:
+                        ppe_res = _classify_label(label)
+                        if ppe_res is not None:
+                            # Bo qua ppe ao giac nam trong vung khoi neu conf thap
+                            in_hazard = _is_in_smoke_or_fire([x1, y1, x2, y2], hazard_boxes, threshold=0.35)
+                            if in_hazard and conf_score < 0.60:
+                                continue
+
+                            ppe_type, status = ppe_res
+                            cx = (x1 + x2) / 2.0
+                            cy = (y1 + y2) / 2.0
+                            candidate_ppe.append({
+                                "type": ppe_type,
+                                "status": status,
+                                "conf": conf_score,
+                                "label": label,
+                                "bbox": [x1, y1, x2, y2],
+                                "center": (cx, cy),
+                            })
 
             # STAGE 1: XAC THUC NGUOI THAT (Cross-verification voi Pose Model & Do sac net canh)
             h_f, w_f = frame.shape[:2]
@@ -539,8 +670,46 @@ class PPEDetector:
                         "label": PPE_LABELS_VI["mask"],
                     })
 
-        # VE PPE ANNOTATION LEN FRAME (chi khi enable_ppe va co vat pham da gan voi nguoi)
+        # Visual Persistence Cache cho PPE:
         if enable_ppe:
+            if should_run_ppe:
+                self._last_rendered_persons = list(person_items)
+                self._last_rendered_ppe_items = list(assigned_ppe_items)
+                self._last_rendered_violations = list(violations)
+                self._last_rendered_all_pids = [p["id"] for p in person_items]
+                self._last_rendered_stats = dict(ppe_stats)
+                self._last_ppe_inference_time = now
+            else:
+                # Khi should_run_ppe=False nhung user bat enable_ppe=True (chi trong 1 frame slot Fall/Fire cua live cam)
+                # Chi tai su dung neu khoang cach thoi gian cuc ngan (0 <= dt < 0.1s ~2 frames), TUYET DOI khong chap nhan dt am hoac >0.1s
+                dt = now - getattr(self, "_last_ppe_inference_time", 0.0)
+                if 0.0 <= dt < 0.1:
+                    person_items = getattr(self, "_last_rendered_persons", [])
+                    assigned_ppe_items = getattr(self, "_last_rendered_ppe_items", [])
+                    violations = getattr(self, "_last_rendered_violations", [])
+                    ppe_stats = getattr(self, "_last_rendered_stats", ppe_stats)
+                else:
+                    person_items = []
+                    assigned_ppe_items = []
+                    violations = []
+        else:
+            # User tat PPE hoan toan -> Khong bao gio dung cache, xoa sach du lieu PPE
+            person_items = []
+            assigned_ppe_items = []
+            violations = []
+            self._last_rendered_persons = []
+            self._last_rendered_ppe_items = []
+            self._last_rendered_violations = []
+            self._last_rendered_all_pids = []
+            self._last_rendered_stats = {
+                "helmet": {"ok": 0, "violation": 0},
+                "vest": {"ok": 0, "violation": 0},
+                "mask": {"ok": 0, "violation": 0},
+            }
+            self._last_ppe_inference_time = 0.0
+
+        # VE PPE ANNOTATION LEN FRAME (chi ve khi enable_ppe=True va co vat pham/nguoi hien tai)
+        if enable_ppe and (person_items or assigned_ppe_items):
             for ppe in assigned_ppe_items:
                 x1, y1, x2, y2 = ppe["bbox"]
                 color = PPE_COLORS[ppe["type"]][ppe["status"]]
@@ -571,27 +740,41 @@ class PPEDetector:
 
         # Ve fall annotation SAU CUNG (sau PPE)
         if fall_detector is not None:
-            if enable_fall:
+            try:
+                frame = fall_detector.annotate_frame(frame, falls, timestamp=now)
+            except TypeError:
                 frame = fall_detector.annotate_frame(frame, falls)
-            else:
-                frame = fall_detector.annotate_frame(frame, [])
 
         # Ve fire/smoke annotation SAU CUNG
         if fire_detector is not None and fires:
             frame = fire_detector.annotate_frame(frame, fires)
 
-        has_violation = (enable_ppe and len(violations) > 0) or (enable_fall and len(falls) > 0) or len(fires) > 0
+        has_violation = (len(violations) > 0) or (len(falls) > 0) or len(fires) > 0
 
         # Ưu tiên hiển thị cảnh báo: CHÁY/KHÓI > NGÃ > VI PHẠM PPE
         if fires:
             # fire_detector.annotate_frame da ve top emergency bar
             pass
         elif enable_fall and falls:
-            cv2.putText(frame, "CAP CUU: PHAT HIEN NGA BAT DONG!", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
+            has_immobile = any(f.get("status") == "fall_immobile" or f.get("fall_duration", 0) >= 5.0 for f in falls)
+            if has_immobile:
+                (bw, bh), _ = cv2.getTextSize("KHAN CAP: NGA BAT DONG (>5s)!", cv2.FONT_HERSHEY_SIMPLEX, 0.85, 2)
+                cv2.rectangle(frame, (12, 12), (28 + bw, 18 + bh + 14), (0, 0, 0), -1)
+                cv2.rectangle(frame, (12, 12), (28 + bw, 18 + bh + 14), (255, 255, 255), 2)
+                cv2.putText(frame, "KHAN CAP: NGA BAT DONG (>5s)!", (20, 20 + bh),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2, cv2.LINE_AA)
+            else:
+                (bw, bh), _ = cv2.getTextSize("CANH BAO: PHAT HIEN NGA!", cv2.FONT_HERSHEY_SIMPLEX, 0.85, 2)
+                cv2.rectangle(frame, (12, 12), (28 + bw, 18 + bh + 14), (0, 0, 220), -1)
+                cv2.putText(frame, "CANH BAO: PHAT HIEN NGA!", (20, 20 + bh),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2, cv2.LINE_AA)
         elif has_violation and enable_ppe:
             cv2.putText(frame, "CANH BAO: Phat hien vi pham PPE!", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
+
+        # Luu tru person items & boxes de CameraManager truy cap
+        self.last_detected_persons = person_items
+        self.last_person_boxes = [p["bbox"] for p in person_items]
 
         # Danh sách TẤT CẢ person IDs trong frame (kể cả người tuân thủ 100%)
         all_person_ids = [p["id"] for p in person_items]

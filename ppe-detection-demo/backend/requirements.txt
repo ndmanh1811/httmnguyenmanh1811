@@ -13,6 +13,8 @@ Werkzeug>=3.0.0
 torch>=2.0.0
 torchvision>=0.15.0
 ultralytics>=8.2.0
+supervision==0.30.6
+sahi==0.12.7
 opencv-python>=4.8.0
 numpy>=1.24.0
 imageio>=2.30.0

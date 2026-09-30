@@ -353,7 +353,7 @@ def create_app():
         from camera_manager import CameraManager
 
         camera_id = request.args.get("camera_id", 0, type=int)
-        frame_skip = int(request.args.get("frame_skip", 4))
+        frame_skip = int(request.args.get("frame_skip", 1))
 
         def _get_query_bool(key, default=True):
             val = request.args.get(key)
