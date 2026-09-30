@@ -3,7 +3,7 @@ violation_routes.py - Violation history endpoints
 """
 
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import datetime, timezone, timedelta
 
 from flask import Blueprint, jsonify, request
 
@@ -15,13 +15,37 @@ violation_bp = Blueprint("violation", __name__)
 @violation_bp.route("/api/violations", methods=["GET"])
 def get_violations():
     page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 20, type=int)
-    vtype = request.args.get("type", "")
+    per_page = request.args.get("per_page", 15, type=int)
+    vtype = request.args.get("type", "").strip()
+    time_range = request.args.get("time_range", "all").strip()
+    camera_id = request.args.get("camera_id", None, type=int)
 
     query = Violation.query.order_by(Violation.timestamp.desc())
 
+    # 1. Loc theo loai su co / vi pham
     if vtype:
-        query = query.filter(Violation.violation_type == vtype)
+        if vtype in ("fall", "fall_detected"):
+            query = query.filter(Violation.violation_type.in_(["fall_detected", "fall_immobile"]))
+        else:
+            query = query.filter(Violation.violation_type == vtype)
+
+    # 2. Loc theo moc thoi gian
+    now_utc = datetime.utcnow()
+    if time_range == "today":
+        now_local = datetime.now()
+        today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_utc = today_start_local.astimezone(timezone.utc).replace(tzinfo=None)
+        query = query.filter(Violation.timestamp >= start_utc)
+    elif time_range == "24h":
+        query = query.filter(Violation.timestamp >= now_utc - timedelta(hours=24))
+    elif time_range == "7d":
+        query = query.filter(Violation.timestamp >= now_utc - timedelta(days=7))
+    elif time_range == "30d":
+        query = query.filter(Violation.timestamp >= now_utc - timedelta(days=30))
+
+    # 3. Loc theo camera
+    if camera_id is not None:
+        query = query.filter(Violation.camera_id == camera_id)
 
     paginated = query.paginate(page=page, per_page=per_page, error_out=False)
 
@@ -45,38 +69,36 @@ def get_violations():
 
 @violation_bp.route("/api/violations/stats/hourly", methods=["GET"])
 def get_hourly_violations():
-    today = date.today()
-    start = today
-    end = today + timedelta(days=1)
+    # Lay phan bo trong 24 gio qua
+    start = datetime.utcnow() - timedelta(hours=24)
 
     violations = Violation.query.filter(
         Violation.timestamp >= start,
-        Violation.timestamp < end,
     ).all()
 
     hourly = defaultdict(lambda: {"count": 0, "fall_count": 0, "fire_count": 0, "smoke_count": 0})
     for v in violations:
-        hour = v.timestamp.hour
+        # Chuyen gio sang local gio Viet Nam (+7)
+        hour = (v.timestamp.hour + 7) % 24 if v.timestamp else 0
         hourly[hour]["count"] += 1
-        if v.violation_type == "fall_detected":
+        if v.violation_type in ("fall_detected", "fall_immobile"):
             hourly[hour]["fall_count"] += 1
         elif v.violation_type == "fire_detected":
             hourly[hour]["fire_count"] += 1
         elif v.violation_type == "smoke_detected":
             hourly[hour]["smoke_count"] += 1
 
-    result = []
-    for h in range(24):
-        result.append({
+    return jsonify([
+        {
             "hour": h,
             "label": f"{h:02d}:00",
             "count": hourly[h]["count"],
             "fall_count": hourly[h]["fall_count"],
             "fire_count": hourly[h]["fire_count"],
             "smoke_count": hourly[h]["smoke_count"],
-        })
-
-    return jsonify(result)
+        }
+        for h in range(24)
+    ])
 
 
 @violation_bp.route("/api/violations/stats/daily", methods=["GET"])

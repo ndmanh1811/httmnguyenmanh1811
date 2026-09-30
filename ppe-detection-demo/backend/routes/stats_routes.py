@@ -2,7 +2,7 @@
 stats_routes.py - Statistics endpoints
 """
 
-from datetime import date, timedelta
+from datetime import datetime, timezone, timedelta
 
 from flask import Blueprint, jsonify, request
 
@@ -13,45 +13,58 @@ stats_bp = Blueprint("stats", __name__)
 
 @stats_bp.route("/api/stats/summary", methods=["GET"])
 def get_summary():
-    today = date.today()
+    # Tinh thoi diem bat dau ngay hom nay theo gio dia phuong (UTC+7)
+    now_local = datetime.now()
+    today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Vi timestamp trong SQLite luu theo UTC naive datetime
+    start_utc = today_start_local.astimezone(timezone.utc).replace(tzinfo=None)
+    twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
 
-    total_today = Violation.query.filter(
-        db.func.date(Violation.timestamp) == today
-    ).count()
+    # Uu tien dem tu dau ngay hom nay (gio dia phuong)
+    today_filter = (Violation.timestamp >= start_utc)
+    total_today = Violation.query.filter(today_filter).count()
+
+    # Neu sang som chua co vi pham moi, lay cua 24h qua de hien thi thong so y nghia
+    if total_today == 0:
+        today_filter = (Violation.timestamp >= twenty_four_hours_ago)
+        total_today = Violation.query.filter(today_filter).count()
 
     helmet_today = Violation.query.filter(
-        db.func.date(Violation.timestamp) == today,
+        today_filter,
         Violation.violation_type == "no_helmet",
     ).count()
 
     vest_today = Violation.query.filter(
-        db.func.date(Violation.timestamp) == today,
+        today_filter,
         Violation.violation_type == "no_vest",
     ).count()
 
     mask_today = Violation.query.filter(
-        db.func.date(Violation.timestamp) == today,
+        today_filter,
         Violation.violation_type == "no_mask",
     ).count()
 
     fall_today = Violation.query.filter(
-        db.func.date(Violation.timestamp) == today,
-        Violation.violation_type == "fall_detected",
+        today_filter,
+        Violation.violation_type.in_(["fall_detected", "fall_immobile"]),
     ).count()
 
     fire_today = Violation.query.filter(
-        db.func.date(Violation.timestamp) == today,
+        today_filter,
         Violation.violation_type == "fire_detected",
     ).count()
 
     smoke_today = Violation.query.filter(
-        db.func.date(Violation.timestamp) == today,
+        today_filter,
         Violation.violation_type == "smoke_detected",
     ).count()
 
     total_all = Violation.query.count()
 
     active_cameras = Camera.query.filter_by(is_active=True).count()
+    if active_cameras == 0:
+        active_cameras = 1  # Camera truc tiep mac dinh (Webcam 0)
 
     return jsonify({
         "total_today": total_today,

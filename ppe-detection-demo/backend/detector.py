@@ -656,8 +656,8 @@ class PPEDetector:
         if fall_detector is not None:
             if enable_fall:
                 try:
-                    # Lay ByteTrack IDs tu person_items de sync voi fall detector
-                    ppe_track_ids = [p["id"] for p in person_items] if person_items else []
+                    # Lay ByteTrack items (id + bbox) de spatial IoU matching voi Pose detector
+                    ppe_track_items = [{"id": p["id"], "bbox": p["bbox"]} for p in person_items] if person_items else []
                     detected_falls = fall_detector.detect(
                         frame,
                         smoke_boxes=smoke_boxes,
@@ -665,10 +665,10 @@ class PPEDetector:
                         use_clahe=use_clahe,
                         use_sahi=use_sahi,
                         timestamp=now,
-                        ppe_track_ids=ppe_track_ids,
+                        ppe_track_items=ppe_track_items,
                     )
                 except TypeError:
-                    # Fallback cho phien ban cu khong co tham so ppe_track_ids
+                    # Fallback cho phien ban cu khong co tham so ppe_track_items
                     detected_falls = fall_detector.detect(
                         frame,
                         smoke_boxes=smoke_boxes,

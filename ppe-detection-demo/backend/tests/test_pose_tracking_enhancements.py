@@ -24,15 +24,15 @@ from pose_fall_detector import PoseFallDetector, KPT_CONF_THRESH
 class TestOneEuroFilterTuning(unittest.TestCase):
     def test_default_parameters(self):
         f1d = _OneEuroFilter1D()
-        self.assertAlmostEqual(f1d.min_cutoff, 1.6)
-        self.assertAlmostEqual(f1d.beta, 0.06)
+        self.assertAlmostEqual(f1d.min_cutoff, 1.2)
+        self.assertAlmostEqual(f1d.beta, 0.15)
 
         pose_filter = OneEuroPoseFilter()
-        self.assertAlmostEqual(pose_filter.min_cutoff, 1.6)
-        self.assertAlmostEqual(pose_filter.beta, 0.06)
+        self.assertAlmostEqual(pose_filter.min_cutoff, 1.2)
+        self.assertAlmostEqual(pose_filter.beta, 0.15)
 
     def test_zero_lag_on_fast_motion(self):
-        f1d = _OneEuroFilter1D(te=1.0 / 30.0, min_cutoff=1.6, beta=0.06)
+        f1d = _OneEuroFilter1D(te=1.0 / 30.0, min_cutoff=1.2, beta=0.15)
         # Stationary
         for _ in range(10):
             val = f1d.filter(100.0)

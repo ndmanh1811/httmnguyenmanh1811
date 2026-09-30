@@ -14,22 +14,52 @@ const TYPE_CONFIG = {
 }
 
 export default function Dashboard() {
-  const [stats, setStats] = useState(null)
-  const [recent, setRecent] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [stats, setStats] = useState(() => {
+    try {
+      const cached = localStorage.getItem('ppe_dashboard_stats')
+      return cached ? JSON.parse(cached) : null
+    } catch (e) {
+      return null
+    }
+  })
+  const [recent, setRecent] = useState(() => {
+    try {
+      const cached = localStorage.getItem('ppe_dashboard_recent')
+      return cached ? JSON.parse(cached) : []
+    } catch (e) {
+      return []
+    }
+  })
+  const [loading, setLoading] = useState(!stats)
 
-  useEffect(() => {
+  const fetchDashboardData = () => {
     Promise.all([
       api.get('/stats/summary').then(r => r.data).catch(() => null),
       api.get('/stats/recent?limit=8').then(r => r.data).catch(() => []),
     ]).then(([summaryData, recentData]) => {
-      if (summaryData) setStats(summaryData)
-      if (recentData) setRecent(recentData)
+      if (summaryData) {
+        setStats(summaryData)
+        try {
+          localStorage.setItem('ppe_dashboard_stats', JSON.stringify(summaryData))
+        } catch (e) {}
+      }
+      if (recentData) {
+        setRecent(recentData)
+        try {
+          localStorage.setItem('ppe_dashboard_recent', JSON.stringify(recentData))
+        } catch (e) {}
+      }
       setLoading(false)
     })
+  }
+
+  useEffect(() => {
+    fetchDashboardData()
+    const timer = setInterval(fetchDashboardData, 8000)
+    return () => clearInterval(timer)
   }, [])
 
-  if (loading || !stats) {
+  if (loading && !stats) {
     return (
       <div className="flex items-center justify-center h-64 text-muted-foreground text-sm">
         Đang tải dữ liệu tổng quan...
