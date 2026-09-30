@@ -1,4 +1,4 @@
-﻿"""
+"""
 test_algorithm_refinement.py - Verification script for Option 1 Computer Vision Algorithms
 """
 
@@ -7,7 +7,7 @@ import sys
 import numpy as np
 import cv2
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from fire_detector import (
     extract_fire_smoke_contour,

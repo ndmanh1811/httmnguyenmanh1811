@@ -794,7 +794,7 @@ class FireSmokeStreamAnalyzer:
         elif isinstance(persistence_sec, (int, float)):
             self.persistence_sec = {"fire": float(persistence_sec), "smoke": float(persistence_sec)}
         else:
-            self.persistence_sec = {"fire": 0.8, "smoke": 2.0}
+            self.persistence_sec = {"fire": 0.8, "smoke": 1.2}
 
         # Thời gian score phải nằm dưới ngưỡng exit trước khi một track verified
         # bị hủy — chống nhấp nháy alert khi score dao động quanh ngưỡng.
@@ -832,6 +832,17 @@ class FireSmokeStreamAnalyzer:
 
         h, w = frame.shape[:2]
         curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Hard scene-cut detection – if frame changes drastically, reset tracks
+        if self._last_gray_frame is not None:
+            diff = cv2.absdiff(curr_gray, self._last_gray_frame).astype(np.float32).mean()
+            if diff > 30:
+                # Reset state on scene cut
+                self._tracks.clear()
+                self._zero_candidate_frames = 0
+                self._last_gray_frame = curr_gray
+                return []  # no fire candidates this frame
+        # Normal detection
         candidates = self.model.predict_candidates(frame, self.fire_conf, self.smoke_conf)
 
         # Exclusion zone and breakout evaluation
@@ -961,7 +972,8 @@ class FireSmokeStreamAnalyzer:
                         track["intensity_history"].pop(0)
 
                 # Upward Plume Optical Flow for Smoke
-                if c_type == "smoke" and self._last_gray_frame is not None:
+                # Compute optical flow for smoke only when confidence is high enough
+                if c_type == "smoke" and self._last_gray_frame is not None and c_conf >= 0.6:
                     upi = compute_plume_optical_flow(self._last_gray_frame, curr_gray, c_bbox)
                     track["upi"] = 0.65 * track.get("upi", upi) + 0.35 * upi
 
@@ -1051,9 +1063,9 @@ class FireSmokeStreamAnalyzer:
                 score, components = self.fire_scorer.calculate(track, timestamp, persistence_win)
                 enter_t, min_dur = 0.50, 0.3
             elif c_type == "smoke":
-                persistence_win = self.persistence_sec.get("smoke", 2.0)
+                persistence_win = self.persistence_sec.get("smoke", 1.2)
                 score, components = self.smoke_scorer.calculate(track, timestamp, persistence_win)
-                enter_t, min_dur = 0.45, 0.4
+                enter_t, min_dur = 0.45, 0.3
             else:
                 continue
 
