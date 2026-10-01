@@ -134,7 +134,7 @@ def merge_sliced_pose_detections(
 class _OneEuroFilter1D:
     """1D One-Euro Filter: Low cutoff at low speeds, high cutoff at high speeds."""
 
-    def __init__(self, te: float = 1.0 / 25.0, min_cutoff: float = 1.2, beta: float = 0.15, d_cutoff: float = 1.0) -> None:
+    def __init__(self, te: float = 1.0 / 25.0, min_cutoff: float = 0.8, beta: float = 0.25, d_cutoff: float = 1.0) -> None:
         self.te = te
         self.min_cutoff = min_cutoff
         self.beta = beta
@@ -165,20 +165,71 @@ class _OneEuroFilter1D:
         return r / (r + 1.0)
 
 
+# Standard COCO Keypoint Standard Deviations for OKS
+COCO_KPT_SIGMAS = np.array([
+    0.026, 0.025, 0.025, 0.035, 0.035,  # 0: nose, 1-2: eyes, 3-4: ears
+    0.079, 0.079,                        # 5-6: shoulders
+    0.072, 0.072,                        # 7-8: elbows
+    0.062, 0.062,                        # 9-10: wrists
+    0.107, 0.107,                        # 11-12: hips
+    0.087, 0.087,                        # 13-14: knees
+    0.089, 0.089,                        # 15-16: ankles
+], dtype=np.float32)
+
+
+def compute_oks(kpts1: np.ndarray, kpts2: np.ndarray, scale: float | None = None) -> float:
+    """
+    Tinh Object Keypoint Similarity (OKS) giua 2 bo 17 keypoints.
+    Tra ve gia tri trong khoang [0.0, 1.0].
+    Dung lam tiebreaker khi giai quyet tranh chap ID giua 2 nguoi di cheo nhau.
+    """
+    if kpts1 is None or kpts2 is None or len(kpts1) < 17 or len(kpts2) < 17:
+        return 0.0
+
+    kpts1_arr = np.array(kpts1, dtype=np.float32)
+    kpts2_arr = np.array(kpts2, dtype=np.float32)
+
+    # Chi tinh voi nhung khop nhin thay o ca 2 bo
+    valid_mask = (kpts1_arr[:, 2] >= 0.25) & (kpts2_arr[:, 2] >= 0.25)
+    num_valid = int(np.sum(valid_mask))
+    if num_valid < 3:
+        return 0.0
+
+    if scale is None or scale <= 5.0:
+        # Tinh scale s tu dien tich bao cua cac khop hop le o kpts1
+        xs = kpts1_arr[valid_mask, 0]
+        ys = kpts1_arr[valid_mask, 1]
+        kw = max(float(np.max(xs) - np.min(xs)), 10.0)
+        kh = max(float(np.max(ys) - np.min(ys)), 20.0)
+        scale = max(math.sqrt(kw * kh), 20.0)
+
+    dx = kpts1_arr[valid_mask, 0] - kpts2_arr[valid_mask, 0]
+    dy = kpts1_arr[valid_mask, 1] - kpts2_arr[valid_mask, 1]
+    d2 = dx ** 2 + dy ** 2
+
+    sigmas = COCO_KPT_SIGMAS[valid_mask]
+    vars = (sigmas * scale) ** 2 * 2.0
+    oks_values = np.exp(-d2 / np.maximum(vars, 1e-4))
+    return float(np.sum(oks_values) / num_valid)
+
+
 class OneEuroPoseFilter:
     """
-    Bộ lọc One-Euro đa kênh cho 17 khớp xương người:
+    Bộ lọc One-Euro đa kênh cho 17 khớp xương người và Bounding Box:
         - Loại bỏ hoàn toàn hiện tượng rung giật (jitter) khi đứng yên.
         - Kháng độ trễ (zero-lag) khi vận động mạnh hoặc rơi ngã.
         - Hỗ trợ lưu vết phục hồi khớp bị che khuất (Occlusion Recovery up to 4 frames).
+        - Ho tro lam min rieng biet cho render_bbox ma khong can thiep logic ngã.
     """
 
-    def __init__(self, min_cutoff: float = 1.2, beta: float = 0.15, max_occluded_frames: int = 4) -> None:
+    def __init__(self, min_cutoff: float = 0.8, beta: float = 0.25, max_occluded_frames: int = 4) -> None:
         self.min_cutoff = min_cutoff
         self.beta = beta
         self.max_occluded_frames = max_occluded_frames
         # pid -> list of 17 (filter_x, filter_y)
         self._filters: dict[int, list[tuple[_OneEuroFilter1D, _OneEuroFilter1D]]] = {}
+        # pid -> list of 4 filters for bbox [x1, y1, x2, y2]
+        self._bbox_filters: dict[int, list[_OneEuroFilter1D]] = {}
         # pid -> (last_kpts, lost_count)
         self._memory: dict[int, dict[str, Any]] = {}
 
@@ -223,14 +274,36 @@ class OneEuroPoseFilter:
         self._memory[pid]["lost"] = 0
         return smoothed
 
+    def smooth_bbox(self, pid: int, bbox: list[int], dt: float = 1.0 / 25.0) -> list[int]:
+        """Lam min rieng cho bbox de phuc vu render hien thi, khong anh huong dong hoc nga."""
+        if not bbox or len(bbox) != 4:
+            return bbox
+
+        if pid not in self._bbox_filters:
+            self._bbox_filters[pid] = [
+                _OneEuroFilter1D(te=dt, min_cutoff=self.min_cutoff, beta=self.beta)
+                for _ in range(4)
+            ]
+            return list(map(int, bbox))
+
+        b_filters = self._bbox_filters[pid]
+        return [
+            int(round(b_filters[0].filter(float(bbox[0]), te=dt))),
+            int(round(b_filters[1].filter(float(bbox[1]), te=dt))),
+            int(round(b_filters[2].filter(float(bbox[2]), te=dt))),
+            int(round(b_filters[3].filter(float(bbox[3]), te=dt))),
+        ]
+
     def cleanup_stale(self, active_pids: set[int]) -> None:
         """Xóa các bộ lọc người không còn trong khung hình."""
         stale = set(self._filters.keys()) - active_pids
         for pid in stale:
             self._filters.pop(pid, None)
+            self._bbox_filters.pop(pid, None)
             self._memory.pop(pid, None)
 
     def reset(self) -> None:
         """Reset toàn bộ trạng thái bộ lọc khi đổi video."""
         self._filters.clear()
+        self._bbox_filters.clear()
         self._memory.clear()

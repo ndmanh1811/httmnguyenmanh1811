@@ -24,15 +24,40 @@ from pose_fall_detector import PoseFallDetector, KPT_CONF_THRESH
 class TestOneEuroFilterTuning(unittest.TestCase):
     def test_default_parameters(self):
         f1d = _OneEuroFilter1D()
-        self.assertAlmostEqual(f1d.min_cutoff, 1.2)
-        self.assertAlmostEqual(f1d.beta, 0.15)
+        self.assertAlmostEqual(f1d.min_cutoff, 0.8)
+        self.assertAlmostEqual(f1d.beta, 0.25)
 
         pose_filter = OneEuroPoseFilter()
-        self.assertAlmostEqual(pose_filter.min_cutoff, 1.2)
-        self.assertAlmostEqual(pose_filter.beta, 0.15)
+        self.assertAlmostEqual(pose_filter.min_cutoff, 0.8)
+        self.assertAlmostEqual(pose_filter.beta, 0.25)
+
+    def test_smooth_bbox(self):
+        pose_filter = OneEuroPoseFilter()
+        raw_bbox = [100, 150, 200, 350]
+        # First call establishes baseline
+        s_box1 = pose_filter.smooth_bbox(1, raw_bbox)
+        self.assertEqual(s_box1, raw_bbox)
+
+        # Slight jitter [102, 149, 201, 351]
+        s_box2 = pose_filter.smooth_bbox(1, [102, 149, 201, 351])
+        self.assertEqual(len(s_box2), 4)
+
+    def test_compute_oks(self):
+        from enhancements import compute_oks
+        kpts1 = np.ones((17, 3), dtype=np.float32)
+        kpts1[:, :2] = np.random.rand(17, 2) * 100
+        # Identical keypoints should give OKS = 1.0
+        oks_same = compute_oks(kpts1, kpts1)
+        self.assertAlmostEqual(oks_same, 1.0, places=3)
+
+        # Distant keypoints should give low OKS
+        kpts2 = kpts1.copy()
+        kpts2[:, :2] += 200.0
+        oks_diff = compute_oks(kpts1, kpts2)
+        self.assertLess(oks_diff, 0.3)
 
     def test_zero_lag_on_fast_motion(self):
-        f1d = _OneEuroFilter1D(te=1.0 / 30.0, min_cutoff=1.2, beta=0.15)
+        f1d = _OneEuroFilter1D(te=1.0 / 30.0, min_cutoff=0.8, beta=0.25)
         # Stationary
         for _ in range(10):
             val = f1d.filter(100.0)
@@ -40,7 +65,6 @@ class TestOneEuroFilterTuning(unittest.TestCase):
 
         # Fast motion jump from 100 to 200
         val1 = f1d.filter(200.0)
-        # With beta=0.06, cutoff expands immediately, filter adapts rapidly
         self.assertGreater(val1, 150.0, "Filter should respond promptly to rapid movement")
 
 
@@ -292,7 +316,51 @@ class TestByteTrackSpatialIoUMatching(unittest.TestCase):
         self.assertEqual(len(self.detector.last_detected_persons), 1)
         self.assertEqual(self.detector.last_detected_persons[0]["pid"], 88)
 
+    def test_oks_tiebreaker_in_phase_1(self):
+        """When 2 prev tracks overlap with a new box, OKS picks the correct pose identity."""
+        # Prev person 1 and 2 at similar boxes
+        kpts_up = np.zeros((17, 3), dtype=np.float32)
+        kpts_up[:, 2] = 0.9
+        kpts_up[5] = [150, 150, 0.9]  # left shoulder
+        kpts_up[6] = [180, 150, 0.9]  # right shoulder
+
+        kpts_down = np.zeros((17, 3), dtype=np.float32)
+        kpts_down[:, 2] = 0.9
+        kpts_down[5] = [150, 220, 0.9]
+        kpts_down[6] = [180, 220, 0.9]
+
+        self.detector._prev_persons = [
+            {"bbox": [100, 100, 200, 300], "kpts": kpts_up, "pid": 1, "track_id": 1, "lost_count": 0},
+            {"bbox": [105, 105, 205, 305], "kpts": kpts_down, "pid": 2, "track_id": 2, "lost_count": 0},
+        ]
+
+        # New detection matches person 1's keypoints
+        new_bboxes = [[102, 102, 202, 302]]
+        new_kpts = [kpts_up]
+
+        matched = self.detector._match_to_prev(new_bboxes, new_kpts=new_kpts)
+        self.assertEqual(matched, [0], "OKS must tiebreak to person 1 whose pose matches closely")
+
+    def test_z_ordering_and_per_id_colors(self):
+        """Persons closer to camera (higher bottom-Y) must be sorted last to draw on top."""
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        kpts = np.zeros((17, 3), dtype=np.float32)
+        kpts[:, 2] = 0.8
+        kpts[5] = [200, 200, 0.8]
+        kpts[6] = [250, 200, 0.8]
+
+        # Far person (bottom y = 250) and Near person (bottom y = 600)
+        self.detector._last_detected_persons = [
+            {"bbox": [100, 50, 200, 600], "render_bbox": [100, 50, 200, 600], "conf": 0.9, "pid": 2, "angle": 0.0, "status": "normal", "keypoints": kpts, "fall_duration": 0.0},
+            {"bbox": [50, 20, 150, 250], "render_bbox": [50, 20, 150, 250], "conf": 0.9, "pid": 1, "angle": 0.0, "status": "normal", "keypoints": kpts, "fall_duration": 0.0},
+        ]
+
+        annotated = self.detector.annotate_frame(frame, [])
+        self.assertIsNotNone(annotated)
+        self.assertEqual(annotated.shape, (720, 1280, 3))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

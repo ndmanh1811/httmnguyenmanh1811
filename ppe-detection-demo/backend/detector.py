@@ -112,6 +112,12 @@ PPE_LABELS_VI = {
     "mask":   "Khau trang",
 }
 
+PPE_CONF_THRESHOLDS: dict[str, float] = {
+    "helmet": 0.40,
+    "vest": 0.45,
+    "mask": 0.40,
+}
+
 
 def _is_in_smoke_or_fire(box: list[int], hazard_boxes: list[list[float]], threshold: float = 0.28) -> bool:
     """Kiem tra xem mot bounding box co giao thoa dang ke voi vung khoi hoac lua khong."""
@@ -427,10 +433,13 @@ class PPEDetector:
                             else:
                                 ppe_res = _classify_label(label)
                                 if ppe_res is not None:
+                                    ppe_type, status = ppe_res
+                                    req_conf = PPE_CONF_THRESHOLDS.get(ppe_type, self.conf)
+                                    if conf_score < req_conf:
+                                        continue
                                     in_hazard = _is_in_smoke_or_fire([x1, y1, x2, y2], hazard_boxes, threshold=0.35)
                                     if in_hazard and conf_score < 0.60:
                                         continue
-                                    ppe_type, status = ppe_res
                                     cx = (x1 + x2) / 2.0
                                     cy = (y1 + y2) / 2.0
                                     candidate_ppe.append({
@@ -470,12 +479,15 @@ class PPEDetector:
                     else:
                         ppe_res = _classify_label(label)
                         if ppe_res is not None:
+                            ppe_type, status = ppe_res
+                            req_conf = PPE_CONF_THRESHOLDS.get(ppe_type, self.conf)
+                            if conf_score < req_conf:
+                                continue
+
                             # Bo qua ppe ao giac nam trong vung khoi neu conf thap
                             in_hazard = _is_in_smoke_or_fire([x1, y1, x2, y2], hazard_boxes, threshold=0.35)
                             if in_hazard and conf_score < 0.60:
                                 continue
-
-                            ppe_type, status = ppe_res
                             cx = (x1 + x2) / 2.0
                             cy = (y1 + y2) / 2.0
                             candidate_ppe.append({
@@ -629,6 +641,16 @@ class PPEDetector:
 
             # STAGE 2: LIEN KET KHONG GIAN (CHI NHUNG VAT PHAM PPE THUOC VE NGUOI XAC THUC MOI DUOC TINH)
             if person_items:
+                # Xay dung pose lookup de xac thuc giai phau khong gian (Anatomical Verification)
+                pose_map: dict[int, dict] = {}
+                for p in person_items:
+                    pid = p["id"]
+                    matched_vp = next((vp for vp in verified_pose_persons if vp.get("pid") == pid), None)
+                    if matched_vp is None:
+                        matched_vp = next((vp for vp in verified_pose_persons if _calc_box_iou(p["bbox"], vp.get("bbox", [])) >= 0.35), None)
+                    if matched_vp is not None:
+                        pose_map[pid] = matched_vp
+
                 for ppe in candidate_ppe:
                     cx, cy = ppe["center"]
                     ppe_type = ppe["type"]
@@ -661,6 +683,37 @@ class PPEDetector:
 
                         if not in_zone:
                             continue
+
+                        # Xac thuc giai phau dua tren Pose Keypoints (Chi ap dung khi is_upright=True)
+                        vp = pose_map.get(p["id"])
+                        if vp is not None and vp.get("is_upright", False):
+                            vkpts = vp.get("keypoints")
+                            if vkpts is not None and len(vkpts) >= 17:
+                                l_sh, r_sh = vkpts[5], vkpts[6]
+                                has_shoulder = (l_sh[2] >= 0.25 or r_sh[2] >= 0.25)
+
+                                if ppe_type == "helmet" and has_shoulder:
+                                    valid_sh_y = [k[1] for k in (l_sh, r_sh) if k[2] >= 0.25]
+                                    shoulder_y = min(valid_sh_y)
+                                    # Mũ bảo hộ của người đứng thẳng không được rơi xuống dưới vai
+                                    if cy > shoulder_y + 0.08 * ph:
+                                        continue
+
+                                elif ppe_type == "vest" and has_shoulder:
+                                    l_hip, r_hip = vkpts[11], vkpts[12]
+                                    has_hip = (l_hip[2] >= 0.25 or r_hip[2] >= 0.25)
+                                    if has_hip:
+                                        shoulder_y = sum(k[1] for k in (l_sh, r_sh) if k[2] >= 0.25) / max(1, sum(1 for k in (l_sh, r_sh) if k[2] >= 0.25))
+                                        hip_y = sum(k[1] for k in (l_hip, r_hip) if k[2] >= 0.25) / max(1, sum(1 for k in (l_hip, r_hip) if k[2] >= 0.25))
+                                        # Áo phản quang phải nằm giữa trục vai và qua hông
+                                        if cy < shoulder_y - 0.15 * ph or cy > hip_y + 0.25 * ph:
+                                            continue
+
+                                elif ppe_type == "mask" and has_shoulder:
+                                    nose = vkpts[0]
+                                    if nose[2] >= 0.25:
+                                        if abs(cy - nose[1]) > 0.20 * ph:
+                                            continue
 
                         pcx = (px1 + px2) / 2.0
                         pcy = (py1 + py2) / 2.0

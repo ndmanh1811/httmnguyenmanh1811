@@ -29,6 +29,7 @@ from enhancements import (
     merge_sliced_pose_detections,
     OneEuroPoseFilter,
     _calc_box_iou,
+    compute_oks,
 )
 
 class FallLSTM(nn.Module):
@@ -194,11 +195,12 @@ class PoseFallDetector:
         self,
         new_bboxes: list[list[int]],
         ppe_track_items: list[dict] | None = None,
+        new_kpts: list[np.ndarray] | None = None,
     ) -> list[int | None | str]:
         """
         3-phase matching cho Pose detections:
         Phase 0: Spatial IoU matching với ByteTrack items (order-independent, length-independent)
-        Phase 1: IoU matching với previous frame tracks
+        Phase 1: IoU matching (ngưỡng 0.35) kết hợp OKS Tiebreaker chống ID Switch
         Phase 2: Adaptive center distance matching
         
         Returns: list of (int index | str marker "BYTE_ID:<id>" | None)
@@ -244,22 +246,29 @@ class PoseFallDetector:
                 used_new_i.add(new_i)
                 used_byte_ids.add(track_id)
 
-        # Giai đoạn 1: IoU Matching với previous tracks
+        # Giai đoạn 1: IoU Matching với previous tracks kết hợp OKS Tiebreaker chống ID Switch khi người cắt mặt
+        phase1_candidates = []
         for new_i, bbox in enumerate(new_bboxes):
             if matched[new_i] is not None:
                 continue
-            best_iou = 0.20
-            best_j = None
             for j, prev in enumerate(self._prev_persons):
                 if j in used_prev:
                     continue
                 iou = _calc_box_iou(bbox, prev["bbox"])
-                if iou > best_iou:
-                    best_iou = iou
-                    best_j = j
-            if best_j is not None:
-                matched[new_i] = best_j
-                used_prev.add(best_j)
+                if iou >= 0.35:
+                    oks = 0.0
+                    if new_kpts is not None and new_i < len(new_kpts) and prev.get("kpts") is not None:
+                        oks = compute_oks(new_kpts[new_i], prev["kpts"])
+                    # Score kết hợp: IoU >= 0.35 là điều kiện tiên quyết, OKS tiebreaker phân giải khi 2 người gần nhau
+                    score = iou + 0.30 * oks
+                    phase1_candidates.append((score, new_i, j))
+
+        phase1_candidates.sort(key=lambda x: x[0], reverse=True)
+        for score, new_i, j in phase1_candidates:
+            if matched[new_i] is not None or j in used_prev:
+                continue
+            matched[new_i] = j
+            used_prev.add(j)
 
         # Giai đoạn 2: Khoảng cách tâm thích ứng
         for new_i, bbox in enumerate(new_bboxes):
@@ -914,7 +923,7 @@ class PoseFallDetector:
                 self._is_fall_confirmed = False
             return falls
 
-        matched_prev = self._match_to_prev(global_bboxes, ppe_track_items)
+        matched_prev = self._match_to_prev(global_bboxes, ppe_track_items, new_kpts=global_kpts)
         new_prev_persons: list[dict] = []
         active_pids: set[int] = set()
 
@@ -1129,12 +1138,15 @@ class PoseFallDetector:
                 else:
                     status = "normal"
 
+            render_bbox = self._pose_filter.smooth_bbox(pid, [x1, y1, x2, y2])
             person_data: dict = {
                 "bbox": [x1, y1, x2, y2],
+                "render_bbox": render_bbox,
                 "conf": conf,
                 "pid": pid,
                 "angle": angle_val,
                 "status": status,
+                "is_upright": bool(is_upright),
                 "fall_frames": fall_count,
                 "immobile_frames": immobile_count,
                 "fall_duration": round(fall_duration, 1),
@@ -1223,15 +1235,40 @@ class PoseFallDetector:
             self._cached_detected_persons = list(persons_to_draw)
             self._last_detected_time = now
 
+        # Z-ordering (Painter's algorithm): Nguoi dung o xa ve truoc (y2 nho), nguoi gan camera ve sau de de len tren
+        if persons_to_draw:
+            persons_to_draw = sorted(persons_to_draw, key=lambda p: p.get("render_bbox", p["bbox"])[3])
+
+        NORMAL_ID_PALETTE = [
+            (0, 220, 255),   # 0: Vang chanh sang
+            (0, 220, 255),   # 1: Vang chanh sang (ID 1 - nguoi dau tien giu mau vang chuan)
+            (255, 200, 0),   # 2: Xanh duong nhe
+            (0, 255, 140),   # 3: Xanh luc neon
+            (255, 120, 0),   # 4: Xanh ngoc dam
+            (180, 50, 255),  # 5: Tim sang
+            (0, 165, 255),   # 6: Cam nhe
+            (255, 0, 200),   # 7: Hong tim
+            (0, 255, 255),   # 8: Vang tinh khiet
+            (200, 255, 0),   # 9: Xanh chuoi
+            (255, 180, 180), # 10: Bac sang
+        ]
+
         frame_h = frame.shape[0] if hasattr(frame, "shape") else 720
 
         for person in persons_to_draw:
             status = person["status"]
             kpts = person["keypoints"]
             angle = person["angle"]
-            x1, y1, x2, y2 = person["bbox"]
+            raw_x1, raw_y1, raw_x2, raw_y2 = person["bbox"]
+            x1, y1, x2, y2 = person.get("render_bbox", [raw_x1, raw_y1, raw_x2, raw_y2])
             pid = person.get("pid", 0)
             fall_dur = person.get("fall_duration", 0.0)
+
+            # Net ve thich ung (Adaptive thickness) theo do gan xa cua nguoi
+            person_h = max(y2 - y1, 10)
+            ratio = person_h / max(frame_h, 1)
+            bone_thick = 2 if ratio > 0.35 else 1
+            joint_r = 3 if ratio > 0.35 else 2
 
             is_immobile = (status == "fall_immobile") or (status == "fall" and fall_dur >= 5.0)
 
@@ -1258,9 +1295,10 @@ class PoseFallDetector:
                 has_white_halo = False
                 status_text = f"Cui nghieng ({angle:.0f}deg) P#{pid}"
             else:
-                # 1. Tư thế bình thường -> MÀU VÀNG (Yellow)
-                bone_color = (0, 220, 255)
-                joint_color = (0, 240, 255)
+                # 1. Tư thế bình thường -> BẢNG MÀU PHÂN BIỆT THEO ID (Per-ID Color)
+                id_col = NORMAL_ID_PALETTE[pid % len(NORMAL_ID_PALETTE)]
+                bone_color = id_col
+                joint_color = id_col
                 core_color = (255, 255, 255)
                 has_white_halo = False
                 status_text = f"P#{pid}"
@@ -1275,7 +1313,7 @@ class PoseFallDetector:
                     if has_white_halo:
                         # Halo trang 4px de xuong den noi bat tuyet doi tren quan ao/nen toi mau
                         cv2.line(frame, pt1, pt2, (255, 255, 255), 4, cv2.LINE_AA)
-                    cv2.line(frame, pt1, pt2, bone_color, 2, cv2.LINE_AA)
+                    cv2.line(frame, pt1, pt2, bone_color, bone_thick, cv2.LINE_AA)
 
             # Ve cac khop (Joints)
             for pt in kpts:
@@ -1283,12 +1321,12 @@ class PoseFallDetector:
                     px, py = int(pt[0]), int(pt[1])
                     if has_white_halo:
                         # Halo trang cho khop den
-                        cv2.circle(frame, (px, py), 4, (255, 255, 255), -1, cv2.LINE_AA)
-                        cv2.circle(frame, (px, py), 3, (0, 0, 0), -1, cv2.LINE_AA)
-                        cv2.circle(frame, (px, py), 1, (255, 255, 255), -1, cv2.LINE_AA)
+                        cv2.circle(frame, (px, py), joint_r + 1, (255, 255, 255), -1, cv2.LINE_AA)
+                        cv2.circle(frame, (px, py), joint_r, (0, 0, 0), -1, cv2.LINE_AA)
+                        cv2.circle(frame, (px, py), max(1, joint_r - 2), (255, 255, 255), -1, cv2.LINE_AA)
                     else:
-                        cv2.circle(frame, (px, py), 3, joint_color, -1, cv2.LINE_AA)
-                        cv2.circle(frame, (px, py), 1, core_color, -1, cv2.LINE_AA)
+                        cv2.circle(frame, (px, py), joint_r, joint_color, -1, cv2.LINE_AA)
+                        cv2.circle(frame, (px, py), max(1, joint_r - 2), core_color, -1, cv2.LINE_AA)
 
             # Hien thi badge trang thai
             if is_immobile:
