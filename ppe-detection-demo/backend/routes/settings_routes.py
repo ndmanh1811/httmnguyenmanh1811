@@ -18,6 +18,11 @@ DEFAULT_SETTINGS = {
     "confirm_ticks": {"value": "3", "description": "Số tick cần thiết để xác nhận vi phạm"},
     "fall_angle_threshold": {"value": "60.0", "description": "Góc tối thiểu phát hiện ngã (độ)"},
     "fall_consecutive_frames": {"value": "8", "description": "Số frame liên tiếp để xác nhận ngã"},
+    "cooldown_seconds": {"value": "5", "description": "Thời gian chống trùng lặp vi phạm (giây)"},
+    "sound_enabled": {"value": "true", "description": "Bật/tắt âm thanh cảnh báo"},
+    "evidence_enabled": {"value": "true", "description": "Bật/tắt lưu ảnh bằng chứng"},
+    "temp_limit": {"value": "40.0", "description": "Ngưỡng nhiệt độ cảnh báo môi trường (°C)"},
+    "auto_alarm_on_overheat": {"value": "false", "description": "Tự động kích hoạt còi/đèn khi quá nhiệt"},
 }
 
 

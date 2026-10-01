@@ -153,6 +153,30 @@ class SoundEngine {
       console.warn('Warning chime audio error:', e)
     }
   }
+
+  /**
+   * 4. Còi báo cháy liên tục (Khi còi/đèn IoT được kích hoạt)
+   */
+  startContinuousFireAlarm() {
+    if (!this.enabled) return
+    this.initContext()
+    if (!this.ctx) return
+    if (this._continuousAlarmTimer) return
+
+    this.playFireSiren()
+    this._continuousAlarmTimer = setInterval(() => {
+      if (this.enabled && this.ctx) {
+        this.playFireSiren()
+      }
+    }, 1900)
+  }
+
+  stopContinuousFireAlarm() {
+    if (this._continuousAlarmTimer) {
+      clearInterval(this._continuousAlarmTimer)
+      this._continuousAlarmTimer = null
+    }
+  }
 }
 
 const soundEngine = new SoundEngine()

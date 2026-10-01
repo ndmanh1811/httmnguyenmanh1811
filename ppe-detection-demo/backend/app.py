@@ -54,6 +54,11 @@ def create_app():
     app.register_blueprint(settings_bp)
     app.register_blueprint(exclusion_bp)
 
+    from routes.iot_routes import iot_bp
+    from iot_service import init_iot_service
+    app.register_blueprint(iot_bp)
+    init_iot_service(app, socketio)
+
     _detector = None
     _fall_detector = None
     _fire_model = None

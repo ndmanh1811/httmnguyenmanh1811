@@ -10,6 +10,10 @@ import {
   Bell,
   BellOff,
   Trash2,
+  Thermometer,
+  Droplets,
+  AlertTriangle,
+  Lightbulb,
 } from 'lucide-react'
 import api from '../api'
 import soundEngine from '../utils/soundEngine'
@@ -131,6 +135,17 @@ export default function Monitor() {
   const [newZoneType, setNewZoneType] = useState('welding')
   const [hoveredZoneId, setHoveredZoneId] = useState(null)
 
+  // IoT Sensor & Alarm States
+  const [iotData, setIotData] = useState({
+    temp: null,
+    hum: null,
+    temp_limit: 40.0,
+    is_over_limit: false,
+    alarm_state: false,
+  })
+  const [alarmActive, setAlarmActive] = useState(false)
+  const [dismissedOverheat, setDismissedOverheat] = useState(false)
+
   const camKeyRef = useRef(null)
   const canvasRef = useRef(null)
   const videoContainerRef = useRef(null)
@@ -179,6 +194,13 @@ export default function Monitor() {
   }, [loadExclusionZones])
 
   useEffect(() => {
+    api.get('/iot/status').then(r => {
+      if (r.data) {
+        setIotData(r.data)
+        setAlarmActive(r.data.alarm_state)
+      }
+    }).catch(() => {})
+
     const socket = io({ transports: ['polling'] })
 
     const handleAlert = (data) => {
@@ -205,8 +227,30 @@ export default function Monitor() {
     socket.on('fall_alert', handleAlert)
     socket.on('fire_alert', handleAlert)
 
+    socket.on('iot_sensor_data', (data) => {
+      setIotData(data)
+      setAlarmActive(data.alarm_state)
+      if (!data.is_over_limit) {
+        setDismissedOverheat(false)
+      }
+    })
+
+    socket.on('iot_alarm_state', (data) => {
+      setAlarmActive(data.alarm_state)
+    })
+
     return () => socket.disconnect()
   }, [soundEnabled, surveillanceActive])
+
+  const handleToggleIotAlarm = async () => {
+    try {
+      const nextState = !alarmActive
+      const res = await api.post('/iot/alarm', { state: nextState })
+      setAlarmActive(res.data.alarm_state)
+    } catch (e) {
+      console.error('Failed to toggle IoT alarm:', e)
+    }
+  }
 
   const stopCamera = useCallback(async () => {
     if (camKeyRef.current) {
